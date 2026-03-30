@@ -85,9 +85,6 @@ builder.Services.Configure<List<DatabaseConfig>>(
     builder.Configuration.GetSection("Databases"));
 
 // ── App services ──────────────────────────────────────────────────────────────
-// IHttpContextAccessor lets DatabaseService read the Mcp-Session-Id header in
-// HTTP/SSE mode to isolate each client's dynamically-added connections.
-builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<IDatabaseService, DatabaseService>();
 builder.Services.AddSingleton(new ServerOptions { AllowAnySql = allowAnySql });
 

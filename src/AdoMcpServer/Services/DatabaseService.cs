@@ -4,7 +4,6 @@ using System.Data.Common;
 using System.Text;
 using AdoMcpServer.Models;
 using Dapper;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
@@ -18,8 +17,7 @@ namespace AdoMcpServer.Services;
 
 public class DatabaseService(
     IOptions<List<DatabaseConfig>> options,
-    ILogger<DatabaseService> logger,
-    IHttpContextAccessor httpContextAccessor) : IDatabaseService
+    ILogger<DatabaseService> logger) : IDatabaseService
 {
     // ─────────────────────────────────────────────────────────────────────────
     // Global configs (from appsettings.json) – read-only, shared by all sessions.
@@ -30,13 +28,14 @@ public class DatabaseService(
     // ─────────────────────────────────────────────────────────────────────────
     // Per-session dynamic connections.
     //
-    // In HTTP/SSE multi-client mode each MCP session carries a unique
-    // "Mcp-Session-Id" header.  We key the mutable connection list by that
-    // value so sessions cannot see each other's dynamically-added connections.
+    // Each MCP session has a unique ID (McpSession.SessionId).  In HTTP/SSE
+    // multi-client mode that ID is non-null; in stdio single-client mode it is
+    // null, so callers pass an empty string as the fallback key.
     //
-    // In stdio mode (single-client process) IHttpContextAccessor.HttpContext
-    // is null; we fall back to the empty-string key, which is fine because
-    // there is only ever one session in that mode.
+    // The session key is supplied explicitly by each tool method, obtained
+    // from McpServer.SessionId (which is injected via the MCP SDK's
+    // RequestServiceProvider<T> mechanism).  This avoids any dependence on
+    // ambient HTTP context and works correctly in both transport modes.
     // ─────────────────────────────────────────────────────────────────────────
     private readonly ConcurrentDictionary<string, SessionStore> _sessions =
         new(StringComparer.OrdinalIgnoreCase);
@@ -73,27 +72,16 @@ public class DatabaseService(
 
     // ── Helper ────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Returns the current session key.
-    /// In HTTP mode this is the value of the <c>Mcp-Session-Id</c> request
-    /// header (assigned by the MCP server upon session initialisation).
-    /// In stdio mode the HTTP context is null and we return an empty string
-    /// (the single-session fallback).
-    /// </summary>
-    private string GetSessionKey() =>
-        httpContextAccessor.HttpContext?.Request.Headers["Mcp-Session-Id"].ToString()
-        ?? string.Empty;
-
-    private SessionStore GetCurrentSessionStore() =>
-        _sessions.GetOrAdd(GetSessionKey(), _ => new SessionStore());
+    private SessionStore GetSessionStore(string sessionKey) =>
+        _sessions.GetOrAdd(sessionKey, _ => new SessionStore());
 
     // ─────────────────────────────────────────────────────────────────────────
     // Public API
     // ─────────────────────────────────────────────────────────────────────────
 
-    public IReadOnlyList<DatabaseConfig> GetConfigurations()
+    public IReadOnlyList<DatabaseConfig> GetConfigurations(string sessionKey)
     {
-        var sessionConfigs = GetCurrentSessionStore().GetSnapshot();
+        var sessionConfigs = GetSessionStore(sessionKey).GetSnapshot();
         // Session-local connections appear first; global ones fill the rest.
         var sessionNames = new HashSet<string>(
             sessionConfigs.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
@@ -104,7 +92,7 @@ public class DatabaseService(
     }
 
     public async Task<string?> AddConnectionAsync(
-        DatabaseConfig config, bool testFirst = true, CancellationToken ct = default)
+        DatabaseConfig config, string sessionKey, bool testFirst = true, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(config.Name))
             return "连接名称不能为空。";
@@ -124,27 +112,27 @@ public class DatabaseService(
             }
         }
 
-        GetCurrentSessionStore().AddOrReplace(config);
+        GetSessionStore(sessionKey).AddOrReplace(config);
         logger.LogInformation(
             "Connection '{Name}' ({DbType}) added to session '{Session}'.",
-            config.Name, config.DbType, GetSessionKey());
+            config.Name, config.DbType, sessionKey);
         return null; // success
     }
 
-    public bool RemoveConnection(string name)
+    public bool RemoveConnection(string name, string sessionKey)
     {
-        var removed = GetCurrentSessionStore().Remove(name);
+        var removed = GetSessionStore(sessionKey).Remove(name);
         if (removed)
             logger.LogInformation(
                 "Connection '{Name}' removed from session '{Session}'.",
-                name, GetSessionKey());
+                name, sessionKey);
         return removed;
     }
 
     public async Task<List<TableInfo>> ListTablesAsync(
-        string connectionName, bool includeViews = true, string? nameFilter = null, CancellationToken ct = default)
+        string connectionName, string sessionKey, bool includeViews = true, string? nameFilter = null, CancellationToken ct = default)
     {
-        var cfg = GetConfig(connectionName);
+        var cfg = GetConfig(connectionName, sessionKey);
         await using var conn = CreateConnection(cfg);
         await conn.OpenAsync(ct);
 
@@ -160,9 +148,9 @@ public class DatabaseService(
     }
 
     public async Task<TableSchema> GetTableSchemaAsync(
-        string connectionName, string tableName, string? schema = null, CancellationToken ct = default)
+        string connectionName, string sessionKey, string tableName, string? schema = null, CancellationToken ct = default)
     {
-        var cfg = GetConfig(connectionName);
+        var cfg = GetConfig(connectionName, sessionKey);
         await using var conn = CreateConnection(cfg);
         await conn.OpenAsync(ct);
 
@@ -178,9 +166,9 @@ public class DatabaseService(
     }
 
     public async Task<List<RoutineInfo>> ListRoutinesAsync(
-        string connectionName, string? nameFilter = null, CancellationToken ct = default)
+        string connectionName, string sessionKey, string? nameFilter = null, CancellationToken ct = default)
     {
-        var cfg = GetConfig(connectionName);
+        var cfg = GetConfig(connectionName, sessionKey);
         await using var conn = CreateConnection(cfg);
         await conn.OpenAsync(ct);
 
@@ -196,9 +184,9 @@ public class DatabaseService(
     }
 
     public async Task<List<IndexInfo>> GetTableIndexesAsync(
-        string connectionName, string tableName, string? schema = null, CancellationToken ct = default)
+        string connectionName, string sessionKey, string tableName, string? schema = null, CancellationToken ct = default)
     {
-        var cfg = GetConfig(connectionName);
+        var cfg = GetConfig(connectionName, sessionKey);
         await using var conn = CreateConnection(cfg);
         await conn.OpenAsync(ct);
 
@@ -214,9 +202,9 @@ public class DatabaseService(
     }
 
     public async Task<QueryResult> ExecuteSqlAsync(
-        string connectionName, string sql, int maxRows = 200, CancellationToken ct = default)
+        string connectionName, string sessionKey, string sql, int maxRows = 200, CancellationToken ct = default)
     {
-        var cfg = GetConfig(connectionName);
+        var cfg = GetConfig(connectionName, sessionKey);
         await using var conn = CreateConnection(cfg);
         await conn.OpenAsync(ct);
 
@@ -259,9 +247,9 @@ public class DatabaseService(
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    private DatabaseConfig GetConfig(string name)
+    private DatabaseConfig GetConfig(string name, string sessionKey)
     {
-        var sessionConfigs = GetCurrentSessionStore().GetSnapshot();
+        var sessionConfigs = GetSessionStore(sessionKey).GetSnapshot();
 
         // Session-local connections shadow global ones with the same name.
         var cfg = sessionConfigs.FirstOrDefault(c =>

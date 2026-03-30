@@ -36,9 +36,9 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     [McpServerTool(Name = "list_connections")]
     [Description("列出所有已配置的数据库连接名称及类型（包含运行时动态添加的连接）。用于确认可用的连接名称（connectionName）。")]
-    public string ListConnections()
+    public string ListConnections(McpServer server)
     {
-        var configs = db.GetConfigurations();
+        var configs = db.GetConfigurations(server.SessionId ?? "");
         if (configs.Count == 0)
             return "没有配置任何数据库连接。请使用 add_connection 工具添加连接，或在 appsettings.json 中添加 Databases 配置节。";
 
@@ -64,6 +64,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         支持的 dbType 值：SqlServer | MySql | PostgreSql | Sqlite | Oracle
         """)]
     public async Task<string> AddConnectionAsync(
+        McpServer server,
         [Description("连接字符串，例如 SQL Server: \"Server=host;Database=db;User Id=sa;Password=***;TrustServerCertificate=true;\"")]
         string connectionString,
         [Description("数据库引擎类型：SqlServer | MySql | PostgreSql | Sqlite | Oracle")]
@@ -94,7 +95,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
             Description      = description,
         };
 
-        var error = await db.AddConnectionAsync(config, testFirst: testConnection, ct: cancellationToken);
+        var error = await db.AddConnectionAsync(config, server.SessionId ?? "", testFirst: testConnection, ct: cancellationToken);
         if (error is not null)
             return $"错误: {error}";
 
@@ -111,10 +112,11 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         注意：通过配置文件预配置的连接（appsettings.json）属于服务器管理员，不可在会话中删除。
         """)]
     public string RemoveConnection(
+        McpServer server,
         [Description("要移除的连接名称。")]
         string connectionName)
     {
-        return db.RemoveConnection(connectionName)
+        return db.RemoveConnection(connectionName, server.SessionId ?? "")
             ? $"连接 '{connectionName}' 已从当前会话中移除。"
             : $"未找到名为 '{connectionName}' 的会话连接（预配置的连接无法删除）。";
     }
@@ -129,6 +131,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         支持按名称关键字搜索过滤，这是理解数据库结构的第一步。
         """)]
     public async Task<string> ListTablesAsync(
+        McpServer server,
         [Description("数据库连接名称，来自 list_connections 工具的结果。")]
         string connectionName,
         [Description("是否同时列出视图，默认 true。")]
@@ -142,7 +145,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     {
         try
         {
-            var tables = await db.ListTablesAsync(connectionName, includeViews, ToLikeFilter(namePattern), cancellationToken);
+            var tables = await db.ListTablesAsync(connectionName, server.SessionId ?? "", includeViews, ToLikeFilter(namePattern), cancellationToken);
             if (tables.Count == 0)
                 return namePattern is null
                     ? "数据库中没有找到任何表或视图。"
@@ -167,6 +170,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         - 表注释和每列的注释/描述（对理解业务含义非常重要）
         """)]
     public async Task<string> GetTableSchemaAsync(
+        McpServer server,
         [Description("数据库连接名称。")]
         string connectionName,
         [Description("表名（不含 schema 前缀）。")]
@@ -177,7 +181,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     {
         try
         {
-            var result = await db.GetTableSchemaAsync(connectionName, tableName, schema, cancellationToken);
+            var result = await db.GetTableSchemaAsync(connectionName, server.SessionId ?? "", tableName, schema, cancellationToken);
             return JsonSerializer.Serialize(result, JsonOpts);
         }
         catch (Exception ex)
@@ -193,6 +197,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     [McpServerTool(Name = "get_table_indexes")]
     [Description("获取指定表上定义的所有索引，包含索引名称、是否唯一、是否主键及涉及的列。")]
     public async Task<string> GetTableIndexesAsync(
+        McpServer server,
         [Description("数据库连接名称。")]
         string connectionName,
         [Description("表名。")]
@@ -203,7 +208,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     {
         try
         {
-            var result = await db.GetTableIndexesAsync(connectionName, tableName, schema, cancellationToken);
+            var result = await db.GetTableIndexesAsync(connectionName, server.SessionId ?? "", tableName, schema, cancellationToken);
             return JsonSerializer.Serialize(result, JsonOpts);
         }
         catch (Exception ex)
@@ -222,6 +227,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         支持按名称关键字搜索过滤。
         """)]
     public async Task<string> ListRoutinesAsync(
+        McpServer server,
         [Description("数据库连接名称。")]
         string connectionName,
         [Description("""
@@ -233,7 +239,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     {
         try
         {
-            var result = await db.ListRoutinesAsync(connectionName, ToLikeFilter(namePattern), cancellationToken);
+            var result = await db.ListRoutinesAsync(connectionName, server.SessionId ?? "", ToLikeFilter(namePattern), cancellationToken);
             if (result.Count == 0)
                 return namePattern is null
                     ? "没有找到存储过程或函数。"
@@ -260,6 +266,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         注意：请谨慎执行 DDL 或 DELETE/UPDATE 语句，此操作不可回滚。
         """)]
     public async Task<string> ExecuteSqlAsync(
+        McpServer server,
         [Description("数据库连接名称。")]
         string connectionName,
         [Description("要执行的 SQL 语句。")]
@@ -277,7 +284,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         maxRows = Math.Clamp(maxRows, 1, 1000);
         try
         {
-            var result = await db.ExecuteSqlAsync(connectionName, sql, maxRows, cancellationToken);
+            var result = await db.ExecuteSqlAsync(connectionName, server.SessionId ?? "", sql, maxRows, cancellationToken);
             return JsonSerializer.Serialize(result, JsonOpts);
         }
         catch (Exception ex)
