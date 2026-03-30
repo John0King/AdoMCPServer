@@ -22,12 +22,12 @@ public class DatabaseTools(IDatabaseService db)
     // ─────────────────────────────────────────────────────────────────────────
 
     [McpServerTool(Name = "list_connections")]
-    [Description("列出所有已配置的数据库连接名称及类型。用于确认可用的连接名称（connectionName）。")]
+    [Description("列出所有已配置的数据库连接名称及类型（包含运行时动态添加的连接）。用于确认可用的连接名称（connectionName）。")]
     public string ListConnections()
     {
         var configs = db.GetConfigurations();
         if (configs.Count == 0)
-            return "没有配置任何数据库连接。请在 appsettings.json 中添加 Databases 配置节。";
+            return "没有配置任何数据库连接。请使用 add_connection 工具添加连接，或在 appsettings.json 中添加 Databases 配置节。";
 
         var sb = new StringBuilder();
         foreach (var c in configs)
@@ -37,6 +37,69 @@ public class DatabaseTools(IDatabaseService db)
                 sb.AppendLine($"  描述: {c.Description}");
         }
         return sb.ToString().TrimEnd();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // add_connection
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [McpServerTool(Name = "add_connection")]
+    [Description("""
+        在运行时动态添加（或替换）一个数据库连接，无需修改配置文件。
+        添加后可立即通过其他工具（list_tables、execute_sql 等）使用该连接名称。
+        支持的 dbType 值：SqlServer | MySql | PostgreSql | Sqlite | Oracle
+        """)]
+    public async Task<string> AddConnectionAsync(
+        [Description("连接字符串，例如 SQL Server: \"Server=host;Database=db;User Id=sa;Password=***;TrustServerCertificate=true;\"")]
+        string connectionString,
+        [Description("数据库引擎类型：SqlServer | MySql | PostgreSql | Sqlite | Oracle")]
+        string dbType,
+        [Description("连接的逻辑名称，用于其他工具的 connectionName 参数。默认自动生成。")]
+        string? name = null,
+        [Description("连接的描述（可选）。")]
+        string? description = null,
+        [Description("是否在保存前测试连接可用性，默认 true。")]
+        bool testConnection = true,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Enum.TryParse<Models.DbType>(dbType, ignoreCase: true, out var parsedDbType))
+        {
+            var validValues = string.Join(", ", Enum.GetNames<Models.DbType>());
+            return $"错误: 无法识别的数据库类型 '{dbType}'。支持的值: {validValues}";
+        }
+
+        var connectionName = string.IsNullOrWhiteSpace(name)
+            ? $"{parsedDbType.ToString().ToLower()}-{Guid.NewGuid().ToString("N")[..6]}"
+            : name;
+
+        var config = new DatabaseConfig
+        {
+            Name             = connectionName,
+            DbType           = parsedDbType,
+            ConnectionString = connectionString,
+            Description      = description,
+        };
+
+        var error = await db.AddConnectionAsync(config, testFirst: testConnection, ct: cancellationToken);
+        if (error is not null)
+            return $"错误: {error}";
+
+        return $"连接 '{connectionName}' ({parsedDbType}) 已成功添加。现在可以使用此名称调用其他数据库工具。";
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // remove_connection
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [McpServerTool(Name = "remove_connection")]
+    [Description("移除一个已注册的数据库连接（动态添加的或预配置的均可）。")]
+    public string RemoveConnection(
+        [Description("要移除的连接名称。")]
+        string connectionName)
+    {
+        return db.RemoveConnection(connectionName)
+            ? $"连接 '{connectionName}' 已移除。"
+            : $"未找到名为 '{connectionName}' 的连接。";
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -84,7 +147,7 @@ public class DatabaseTools(IDatabaseService db)
         string connectionName,
         [Description("表名（不含 schema 前缀）。")]
         string tableName,
-        [Description("Schema 名称，SQL Server 默认 dbo，PostgreSQL 默认 public，MySQL/SQLite 可留空。")]
+        [Description("Schema 名称，SQL Server 默认 dbo，PostgreSQL 默认 public，Oracle 默认当前用户，MySQL/SQLite 可留空。")]
         string? schema = null,
         CancellationToken cancellationToken = default)
     {
@@ -182,3 +245,4 @@ public class DatabaseTools(IDatabaseService db)
         }
     }
 }
+

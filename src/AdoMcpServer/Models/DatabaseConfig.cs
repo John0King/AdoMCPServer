@@ -7,6 +7,7 @@ public enum DbType
     MySql,
     PostgreSql,
     Sqlite,
+    Oracle,
 }
 
 /// <summary>A named database connection configuration entry.</summary>

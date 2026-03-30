@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using MySqlConnector;
 using Npgsql;
+using Oracle.ManagedDataAccess.Client;
 using DbType = AdoMcpServer.Models.DbType;
 
 namespace AdoMcpServer.Services;
@@ -17,13 +18,63 @@ public class DatabaseService(
     IOptions<List<DatabaseConfig>> options,
     ILogger<DatabaseService> logger) : IDatabaseService
 {
-    private readonly List<DatabaseConfig> _configs = options.Value;
+    // The list is mutable at runtime (ad-hoc connections added by the LLM);
+    // all access is serialised through _lock.
+    private readonly List<DatabaseConfig> _configs = new(options.Value);
+    private readonly Lock _lock = new();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Public API
     // ─────────────────────────────────────────────────────────────────────────
 
-    public IReadOnlyList<DatabaseConfig> GetConfigurations() => _configs.AsReadOnly();
+    public IReadOnlyList<DatabaseConfig> GetConfigurations()
+    {
+        lock (_lock) return _configs.ToList().AsReadOnly();
+    }
+
+    public async Task<string?> AddConnectionAsync(
+        DatabaseConfig config, bool testFirst = true, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(config.Name))
+            return "连接名称不能为空。";
+        if (string.IsNullOrWhiteSpace(config.ConnectionString))
+            return "连接字符串不能为空。";
+
+        if (testFirst)
+        {
+            try
+            {
+                await using var conn = CreateConnection(config);
+                await conn.OpenAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                return $"连接测试失败: {ex.Message}";
+            }
+        }
+
+        lock (_lock)
+        {
+            _configs.RemoveAll(c =>
+                string.Equals(c.Name, config.Name, StringComparison.OrdinalIgnoreCase));
+            _configs.Add(config);
+        }
+
+        logger.LogInformation("Connection '{Name}' ({DbType}) added/updated.", config.Name, config.DbType);
+        return null; // success
+    }
+
+    public bool RemoveConnection(string name)
+    {
+        lock (_lock)
+        {
+            var removed = _configs.RemoveAll(c =>
+                string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)) > 0;
+            if (removed)
+                logger.LogInformation("Connection '{Name}' removed.", name);
+            return removed;
+        }
+    }
 
     public async Task<List<TableInfo>> ListTablesAsync(
         string connectionName, bool includeViews = true, CancellationToken ct = default)
@@ -38,6 +89,7 @@ public class DatabaseService(
             DbType.MySql       => await ListTablesMySqlAsync(conn, includeViews, ct),
             DbType.PostgreSql  => await ListTablesPostgreSqlAsync(conn, includeViews, ct),
             DbType.Sqlite      => await ListTablesSqliteAsync(conn, includeViews, ct),
+            DbType.Oracle      => await ListTablesOracleAsync(conn, includeViews, ct),
             _                  => throw new NotSupportedException($"DbType '{cfg.DbType}' is not supported.")
         };
     }
@@ -55,6 +107,7 @@ public class DatabaseService(
             DbType.MySql       => await GetTableSchemaMySqlAsync(conn, tableName, schema, ct),
             DbType.PostgreSql  => await GetTableSchemaPostgreSqlAsync(conn, tableName, schema, ct),
             DbType.Sqlite      => await GetTableSchemaSqliteAsync(conn, tableName, ct),
+            DbType.Oracle      => await GetTableSchemaOracleAsync(conn, tableName, schema, ct),
             _                  => throw new NotSupportedException($"DbType '{cfg.DbType}' is not supported.")
         };
     }
@@ -72,6 +125,7 @@ public class DatabaseService(
             DbType.MySql       => await ListRoutinesMySqlAsync(conn, ct),
             DbType.PostgreSql  => await ListRoutinesPostgreSqlAsync(conn, ct),
             DbType.Sqlite      => [],   // SQLite has no stored procedures
+            DbType.Oracle      => await ListRoutinesOracleAsync(conn, ct),
             _                  => throw new NotSupportedException($"DbType '{cfg.DbType}' is not supported.")
         };
     }
@@ -89,6 +143,7 @@ public class DatabaseService(
             DbType.MySql       => await GetIndexesMySqlAsync(conn, tableName, schema, ct),
             DbType.PostgreSql  => await GetIndexesPostgreSqlAsync(conn, tableName, schema, ct),
             DbType.Sqlite      => await GetIndexesSqliteAsync(conn, tableName, ct),
+            DbType.Oracle      => await GetIndexesOracleAsync(conn, tableName, schema, ct),
             _                  => throw new NotSupportedException($"DbType '{cfg.DbType}' is not supported.")
         };
     }
@@ -141,11 +196,14 @@ public class DatabaseService(
 
     private DatabaseConfig GetConfig(string name)
     {
-        var cfg = _configs.FirstOrDefault(c =>
-            string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
-        return cfg ?? throw new KeyNotFoundException(
-            $"No database configuration named '{name}' was found. " +
-            $"Available: {string.Join(", ", _configs.Select(c => c.Name))}");
+        lock (_lock)
+        {
+            var cfg = _configs.FirstOrDefault(c =>
+                string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+            return cfg ?? throw new KeyNotFoundException(
+                $"No database configuration named '{name}' was found. " +
+                $"Available: {string.Join(", ", _configs.Select(c => c.Name))}");
+        }
     }
 
     private static DbConnection CreateConnection(DatabaseConfig cfg) => cfg.DbType switch
@@ -154,6 +212,7 @@ public class DatabaseService(
         DbType.MySql      => new MySqlConnection(cfg.ConnectionString),
         DbType.PostgreSql => new NpgsqlConnection(cfg.ConnectionString),
         DbType.Sqlite     => new SqliteConnection(cfg.ConnectionString),
+        DbType.Oracle     => new OracleConnection(cfg.ConnectionString),
         _                 => throw new NotSupportedException($"DbType '{cfg.DbType}' is not supported.")
     };
 
@@ -737,4 +796,183 @@ public class DatabaseService(
                      : null,
         Comment      = r.Comment as string,
     };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Oracle – list tables
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static async Task<List<TableInfo>> ListTablesOracleAsync(
+        DbConnection conn, bool includeViews, CancellationToken ct)
+    {
+        var typeFilter = includeViews ? "o.OBJECT_TYPE IN ('TABLE','VIEW')" : "o.OBJECT_TYPE = 'TABLE'";
+        var sql = $"""
+            SELECT
+                o.OWNER         AS "Schema",
+                o.OBJECT_NAME   AS "Name",
+                o.OBJECT_TYPE   AS "Type",
+                c.COMMENTS      AS "Comment"
+            FROM ALL_OBJECTS o
+            LEFT JOIN ALL_TAB_COMMENTS c
+                ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
+            WHERE {typeFilter}
+              AND o.OWNER = SYS_CONTEXT('USERENV','CURRENT_SCHEMA')
+            ORDER BY o.OBJECT_NAME
+            """;
+
+        var rows = await conn.QueryAsync(new CommandDefinition(sql, cancellationToken: ct));
+        return rows.Select(r => new TableInfo
+        {
+            Schema  = (string)r.Schema,
+            Name    = (string)r.Name,
+            Type    = (string)r.Type,
+            Comment = r.Comment as string,
+        }).ToList();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Oracle – table schema
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static async Task<TableSchema> GetTableSchemaOracleAsync(
+        DbConnection conn, string tableName, string? schema, CancellationToken ct)
+    {
+        // Oracle data-dictionary views store object names in UPPERCASE by default
+        // (unless the object was created with a quoted mixed-case identifier, which is rare).
+        // We normalise the caller-supplied names to uppercase so lookups work reliably.
+        const string tableCommentSql = """
+            SELECT COMMENTS
+            FROM ALL_TAB_COMMENTS
+            WHERE TABLE_NAME = :table
+              AND OWNER = COALESCE(:schema, SYS_CONTEXT('USERENV','CURRENT_SCHEMA'))
+            """;
+
+        var tableComment = await conn.ExecuteScalarAsync<string?>(
+            new CommandDefinition(tableCommentSql,
+                new { table = tableName.ToUpperInvariant(), schema = schema?.ToUpperInvariant() },
+                cancellationToken: ct));
+
+        const string colSql = """
+            SELECT
+                col.COLUMN_NAME                                         AS "Name",
+                col.DATA_TYPE                                           AS "DataType",
+                CASE col.NULLABLE WHEN 'Y' THEN 1 ELSE 0 END           AS "IsNullable",
+                CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END  AS "IsPrimaryKey",
+                col.DATA_DEFAULT                                        AS "DefaultValue",
+                col.CHAR_LENGTH                                         AS "MaxLength",
+                cc.COMMENTS                                             AS "Comment"
+            FROM ALL_TAB_COLUMNS col
+            LEFT JOIN ALL_COL_COMMENTS cc
+                ON cc.OWNER = col.OWNER
+                AND cc.TABLE_NAME = col.TABLE_NAME
+                AND cc.COLUMN_NAME = col.COLUMN_NAME
+            LEFT JOIN (
+                SELECT acc.COLUMN_NAME
+                FROM ALL_CONSTRAINTS ac
+                JOIN ALL_CONS_COLUMNS acc
+                    ON acc.OWNER = ac.OWNER AND acc.CONSTRAINT_NAME = ac.CONSTRAINT_NAME
+                WHERE ac.CONSTRAINT_TYPE = 'P'
+                  AND ac.TABLE_NAME = :table
+                  AND ac.OWNER = COALESCE(:schema, SYS_CONTEXT('USERENV','CURRENT_SCHEMA'))
+            ) pk ON pk.COLUMN_NAME = col.COLUMN_NAME
+            WHERE col.TABLE_NAME = :table
+              AND col.OWNER = COALESCE(:schema, SYS_CONTEXT('USERENV','CURRENT_SCHEMA'))
+            ORDER BY col.COLUMN_ID
+            """;
+
+        var cols = await conn.QueryAsync(
+            new CommandDefinition(colSql,
+                new { table = tableName.ToUpperInvariant(), schema = schema?.ToUpperInvariant() },
+                cancellationToken: ct));
+
+        return new TableSchema
+        {
+            Schema       = schema ?? string.Empty,
+            TableName    = tableName,
+            TableComment = tableComment,
+            Columns      = cols.Select(r => new ColumnInfo
+            {
+                Name         = (string)r.Name,
+                DataType     = (string)r.DataType,
+                IsNullable   = (int)r.IsNullable == 1,
+                IsPrimaryKey = (int)r.IsPrimaryKey == 1,
+                DefaultValue = r.DefaultValue as string,
+                MaxLength    = r.MaxLength is decimal d && d > 0 ? (int?)Convert.ToInt32(d) : null,
+                Comment      = r.Comment as string,
+            }).ToList(),
+        };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Oracle – routines
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static async Task<List<RoutineInfo>> ListRoutinesOracleAsync(
+        DbConnection conn, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT
+                p.OWNER         AS "Schema",
+                p.OBJECT_NAME   AS "Name",
+                p.OBJECT_TYPE   AS "Type",
+                NULL            AS "Comment"
+            FROM ALL_PROCEDURES p
+            WHERE p.OWNER = SYS_CONTEXT('USERENV','CURRENT_SCHEMA')
+              AND p.OBJECT_TYPE IN ('PROCEDURE','FUNCTION','PACKAGE')
+            ORDER BY p.OBJECT_NAME
+            """;
+
+        var rows = await conn.QueryAsync(new CommandDefinition(sql, cancellationToken: ct));
+        return rows.Select(r => new RoutineInfo
+        {
+            Schema     = (string)r.Schema,
+            Name       = (string)r.Name,
+            Type       = (string)r.Type,
+            Definition = null,  // Oracle source retrieval requires per-object calls; omit for brevity
+            Comment    = null,
+        }).ToList();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Oracle – indexes
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static async Task<List<IndexInfo>> GetIndexesOracleAsync(
+        DbConnection conn, string tableName, string? schema, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT
+                ic.INDEX_NAME                                           AS "IndexName",
+                CASE i.UNIQUENESS WHEN 'UNIQUE' THEN 1 ELSE 0 END      AS "IsUnique",
+                CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END    AS "IsPrimaryKey",
+                ic.COLUMN_NAME                                          AS "ColumnName"
+            FROM ALL_IND_COLUMNS ic
+            JOIN ALL_INDEXES i
+                ON i.OWNER = ic.INDEX_OWNER AND i.INDEX_NAME = ic.INDEX_NAME
+            LEFT JOIN ALL_CONSTRAINTS c
+                ON c.OWNER = i.OWNER AND c.INDEX_NAME = i.INDEX_NAME AND c.CONSTRAINT_TYPE = 'P'
+            WHERE ic.TABLE_NAME = :table
+              AND ic.TABLE_OWNER = COALESCE(:schema, SYS_CONTEXT('USERENV','CURRENT_SCHEMA'))
+            ORDER BY ic.INDEX_NAME, ic.COLUMN_POSITION
+            """;
+
+        var rows = await conn.QueryAsync(
+            new CommandDefinition(sql,
+                new { table = tableName.ToUpperInvariant(), schema = schema?.ToUpperInvariant() },
+                cancellationToken: ct));
+
+        return rows
+            .GroupBy(r => new { IndexName = (string)r.IndexName })
+            .Select(g =>
+            {
+                var first = g.First();
+                return new IndexInfo
+                {
+                    IndexName    = g.Key.IndexName,
+                    IsUnique     = (int)first.IsUnique == 1,
+                    IsPrimaryKey = (int)first.IsPrimaryKey == 1,
+                    Columns      = g.Select(r => (string)r.ColumnName).ToList(),
+                };
+            })
+            .ToList();
+    }
 }

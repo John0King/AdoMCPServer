@@ -2,14 +2,23 @@ using AdoMcpServer.Models;
 using AdoMcpServer.Services;
 using AdoMcpServer.Tools;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Determine transport mode:
-//   --stdio  (or env ADOMCP_MODE=stdio)  → stdio transport  (default)
-//   --http   (or env ADOMCP_MODE=http)   → HTTP/SSE transport
+// Transport-mode detection
+//
+// The idiomatic approach for MCP servers:
+//   • When stdin is redirected (piped) the process is being driven by an MCP
+//     client → use stdio transport.
+//   • When running interactively (e.g. started from a terminal) → HTTP/SSE.
+//
+// Manual overrides are still honoured for scripting / CI:
+//   --stdio   force stdio mode
+//   --http    force HTTP mode
+//   ADOMCP_MODE=stdio|http  env-var override
 // ─────────────────────────────────────────────────────────────────────────────
 var modeArg = args.FirstOrDefault(a =>
     a.Equals("--stdio", StringComparison.OrdinalIgnoreCase) ||
@@ -17,8 +26,15 @@ var modeArg = args.FirstOrDefault(a =>
 
 var envMode = Environment.GetEnvironmentVariable("ADOMCP_MODE");
 
-bool isHttp = modeArg?.Equals("--http", StringComparison.OrdinalIgnoreCase) == true
-    || (modeArg is null && string.Equals(envMode, "http", StringComparison.OrdinalIgnoreCase));
+bool isStdio =
+    // Explicit flag
+    modeArg?.Equals("--stdio", StringComparison.OrdinalIgnoreCase) == true
+    // Env-var override
+    || string.Equals(envMode, "stdio", StringComparison.OrdinalIgnoreCase)
+    // Auto-detect: stdin is being piped → launched by an MCP client
+    || (modeArg is null
+        && !string.Equals(envMode, "http", StringComparison.OrdinalIgnoreCase)
+        && Console.IsInputRedirected);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Builder
@@ -34,17 +50,24 @@ builder.Configuration
     .AddUserSecrets<Program>(optional: true);
 
 // ── Logging ──────────────────────────────────────────────────────────────────
-// In stdio mode the stdout stream is the MCP transport channel — all logs MUST
-// go to stderr only so they never corrupt the JSON-RPC stream.
+// In stdio mode the stdout stream is the MCP transport channel — ALL log output
+// MUST go to stderr so it never corrupts the JSON-RPC message stream.
 builder.Logging.ClearProviders();
-if (isHttp)
+if (isStdio)
 {
-    builder.Logging.AddConsole();
+    builder.Logging.AddConsole(opts => opts.LogToStandardErrorThreshold = LogLevel.Trace);
 }
 else
 {
-    // Redirect all log output to stderr for stdio mode.
-    builder.Logging.AddConsole(opts => opts.LogToStandardErrorThreshold = LogLevel.Trace);
+    builder.Logging.AddConsole();
+}
+
+// ── Kestrel: suppress HTTP server in stdio mode ───────────────────────────────
+// In stdio mode there is no HTTP traffic; prevent Kestrel from binding any port
+// so we don't waste resources or conflict with other services.
+if (isStdio)
+{
+    builder.WebHost.UseUrls(string.Empty);
 }
 
 // ── Database configs ──────────────────────────────────────────────────────────
@@ -59,13 +82,13 @@ var mcpBuilder = builder.Services
     .AddMcpServer()
     .WithToolsFromAssembly(typeof(DatabaseTools).Assembly);
 
-if (isHttp)
+if (isStdio)
 {
-    mcpBuilder.WithHttpTransport();
+    mcpBuilder.WithStdioServerTransport();
 }
 else
 {
-    mcpBuilder.WithStdioServerTransport();
+    mcpBuilder.WithHttpTransport();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,7 +96,7 @@ else
 // ─────────────────────────────────────────────────────────────────────────────
 var app = builder.Build();
 
-if (isHttp)
+if (!isStdio)
 {
     app.MapMcp("/mcp");
 }

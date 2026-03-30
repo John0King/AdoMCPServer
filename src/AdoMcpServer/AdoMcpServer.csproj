@@ -25,6 +25,8 @@
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.2.0" />
     <PackageReference Include="MySqlConnector" Version="2.4.0" />
     <PackageReference Include="Npgsql" Version="10.0.2" />
+    <PackageReference Include="Oracle.ManagedDataAccess.Core" Version="23.26.100" />
+    <!-- SqlSugarCore is included as an ORM option for consumers of this tool server -->
     <PackageReference Include="SqlSugarCore" Version="5.1.4.214" />
   </ItemGroup>
 
