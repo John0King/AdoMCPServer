@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Data;
 using System.Data.Common;
 using System.Text;
@@ -20,79 +19,38 @@ public class DatabaseService(
     ILogger<DatabaseService> logger) : IDatabaseService
 {
     // ─────────────────────────────────────────────────────────────────────────
-    // Global configs (from appsettings.json) – read-only, shared by all sessions.
+    // Global configs (from appsettings.json) – read-only, shared by all callers.
     // ─────────────────────────────────────────────────────────────────────────
     private readonly IReadOnlyList<DatabaseConfig> _globalConfigs =
         options.Value.ToList().AsReadOnly();
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Per-session dynamic connections.
-    //
-    // Each MCP session has a unique ID (McpSession.SessionId).  In HTTP/SSE
-    // multi-client mode that ID is non-null; in stdio single-client mode it is
-    // null, so callers pass an empty string as the fallback key.
-    //
-    // The session key is supplied explicitly by each tool method, obtained
-    // from McpServer.SessionId (which is injected via the MCP SDK's
-    // RequestServiceProvider<T> mechanism).  This avoids any dependence on
-    // ambient HTTP context and works correctly in both transport modes.
+    // Runtime dynamic connections – a single global list shared by all callers.
+    // Dynamic connections added via add_connection are visible to every client.
     // ─────────────────────────────────────────────────────────────────────────
-    private readonly ConcurrentDictionary<string, SessionStore> _sessions =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    // ── Per-session connection store ──────────────────────────────────────────
-
-    private sealed class SessionStore
-    {
-        private readonly List<DatabaseConfig> _configs = [];
-        private readonly Lock _lock = new();
-
-        public List<DatabaseConfig> GetSnapshot()
-        {
-            lock (_lock) return [.._configs];
-        }
-
-        public void AddOrReplace(DatabaseConfig config)
-        {
-            lock (_lock)
-            {
-                _configs.RemoveAll(c =>
-                    string.Equals(c.Name, config.Name, StringComparison.OrdinalIgnoreCase));
-                _configs.Add(config);
-            }
-        }
-
-        public bool Remove(string name)
-        {
-            lock (_lock)
-                return _configs.RemoveAll(c =>
-                    string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)) > 0;
-        }
-    }
-
-    // ── Helper ────────────────────────────────────────────────────────────────
-
-    private SessionStore GetSessionStore(string sessionKey) =>
-        _sessions.GetOrAdd(sessionKey, _ => new SessionStore());
+    private readonly List<DatabaseConfig> _dynamicConfigs = [];
+    private readonly Lock _lock = new();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Public API
     // ─────────────────────────────────────────────────────────────────────────
 
-    public IReadOnlyList<DatabaseConfig> GetConfigurations(string sessionKey)
+    public IReadOnlyList<DatabaseConfig> GetConfigurations()
     {
-        var sessionConfigs = GetSessionStore(sessionKey).GetSnapshot();
-        // Session-local connections appear first; global ones fill the rest.
-        var sessionNames = new HashSet<string>(
-            sessionConfigs.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
-        return sessionConfigs
-            .Concat(_globalConfigs.Where(c => !sessionNames.Contains(c.Name)))
+        List<DatabaseConfig> dynamic;
+        lock (_lock) dynamic = [.._dynamicConfigs];
+
+        // Dynamic connections appear first; global ones fill the rest.
+        var dynamicNames = new HashSet<string>(
+            dynamic.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
+        return dynamic
+            .Concat(_globalConfigs.Where(c => !dynamicNames.Contains(c.Name)))
             .ToList()
             .AsReadOnly();
     }
 
     public async Task<string?> AddConnectionAsync(
-        DatabaseConfig config, string sessionKey, bool testFirst = true, CancellationToken ct = default)
+        DatabaseConfig config, bool testFirst = true, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(config.Name))
             return "连接名称不能为空。";
@@ -112,27 +70,33 @@ public class DatabaseService(
             }
         }
 
-        GetSessionStore(sessionKey).AddOrReplace(config);
+        lock (_lock)
+        {
+            _dynamicConfigs.RemoveAll(c =>
+                string.Equals(c.Name, config.Name, StringComparison.OrdinalIgnoreCase));
+            _dynamicConfigs.Add(config);
+        }
         logger.LogInformation(
-            "Connection '{Name}' ({DbType}) added to session '{Session}'.",
-            config.Name, config.DbType, sessionKey);
+            "Connection '{Name}' ({DbType}) added to global dynamic store.",
+            config.Name, config.DbType);
         return null; // success
     }
 
-    public bool RemoveConnection(string name, string sessionKey)
+    public bool RemoveConnection(string name)
     {
-        var removed = GetSessionStore(sessionKey).Remove(name);
+        bool removed;
+        lock (_lock)
+            removed = _dynamicConfigs.RemoveAll(c =>
+                string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)) > 0;
         if (removed)
-            logger.LogInformation(
-                "Connection '{Name}' removed from session '{Session}'.",
-                name, sessionKey);
+            logger.LogInformation("Connection '{Name}' removed from global dynamic store.", name);
         return removed;
     }
 
     public async Task<List<TableInfo>> ListTablesAsync(
-        string connectionName, string sessionKey, bool includeViews = true, string? nameFilter = null, CancellationToken ct = default)
+        string connectionName, bool includeViews = true, string? nameFilter = null, CancellationToken ct = default)
     {
-        var cfg = GetConfig(connectionName, sessionKey);
+        var cfg = GetConfig(connectionName);
         await using var conn = CreateConnection(cfg);
         await conn.OpenAsync(ct);
 
@@ -148,9 +112,9 @@ public class DatabaseService(
     }
 
     public async Task<TableSchema> GetTableSchemaAsync(
-        string connectionName, string sessionKey, string tableName, string? schema = null, CancellationToken ct = default)
+        string connectionName, string tableName, string? schema = null, CancellationToken ct = default)
     {
-        var cfg = GetConfig(connectionName, sessionKey);
+        var cfg = GetConfig(connectionName);
         await using var conn = CreateConnection(cfg);
         await conn.OpenAsync(ct);
 
@@ -166,9 +130,9 @@ public class DatabaseService(
     }
 
     public async Task<List<RoutineInfo>> ListRoutinesAsync(
-        string connectionName, string sessionKey, string? nameFilter = null, CancellationToken ct = default)
+        string connectionName, string? nameFilter = null, CancellationToken ct = default)
     {
-        var cfg = GetConfig(connectionName, sessionKey);
+        var cfg = GetConfig(connectionName);
         await using var conn = CreateConnection(cfg);
         await conn.OpenAsync(ct);
 
@@ -184,9 +148,9 @@ public class DatabaseService(
     }
 
     public async Task<List<IndexInfo>> GetTableIndexesAsync(
-        string connectionName, string sessionKey, string tableName, string? schema = null, CancellationToken ct = default)
+        string connectionName, string tableName, string? schema = null, CancellationToken ct = default)
     {
-        var cfg = GetConfig(connectionName, sessionKey);
+        var cfg = GetConfig(connectionName);
         await using var conn = CreateConnection(cfg);
         await conn.OpenAsync(ct);
 
@@ -202,9 +166,9 @@ public class DatabaseService(
     }
 
     public async Task<QueryResult> ExecuteSqlAsync(
-        string connectionName, string sessionKey, string sql, int maxRows = 200, CancellationToken ct = default)
+        string connectionName, string sql, int maxRows = 200, CancellationToken ct = default)
     {
-        var cfg = GetConfig(connectionName, sessionKey);
+        var cfg = GetConfig(connectionName);
         await using var conn = CreateConnection(cfg);
         await conn.OpenAsync(ct);
 
@@ -247,19 +211,20 @@ public class DatabaseService(
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    private DatabaseConfig GetConfig(string name, string sessionKey)
+    private DatabaseConfig GetConfig(string name)
     {
-        var sessionConfigs = GetSessionStore(sessionKey).GetSnapshot();
+        List<DatabaseConfig> dynamic;
+        lock (_lock) dynamic = [.._dynamicConfigs];
 
-        // Session-local connections shadow global ones with the same name.
-        var cfg = sessionConfigs.FirstOrDefault(c =>
+        // Dynamic connections shadow global ones with the same name.
+        var cfg = dynamic.FirstOrDefault(c =>
                       string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))
                   ?? _globalConfigs.FirstOrDefault(c =>
                       string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
 
         return cfg ?? throw new KeyNotFoundException(
             $"No database configuration named '{name}' was found. " +
-            $"Available: {string.Join(", ", sessionConfigs.Concat(_globalConfigs).Select(c => c.Name).Distinct())}");
+            $"Available: {string.Join(", ", dynamic.Concat(_globalConfigs).Select(c => c.Name).Distinct())}");
     }
 
     private static DbConnection CreateConnection(DatabaseConfig cfg) => cfg.DbType switch
