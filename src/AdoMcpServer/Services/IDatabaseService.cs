@@ -19,13 +19,13 @@ public interface IDatabaseService
     bool RemoveConnection(string name);
 
     /// <summary>Lists tables (and optionally views) in the target database, including their comments.</summary>
-    Task<List<TableInfo>> ListTablesAsync(string connectionName, bool includeViews = true, CancellationToken ct = default);
+    Task<List<TableInfo>> ListTablesAsync(string connectionName, bool includeViews = true, string? nameFilter = null, CancellationToken ct = default);
 
     /// <summary>Returns the full schema of a table, including column types and comments.</summary>
     Task<TableSchema> GetTableSchemaAsync(string connectionName, string tableName, string? schema = null, CancellationToken ct = default);
 
     /// <summary>Lists stored procedures and functions in the target database.</summary>
-    Task<List<RoutineInfo>> ListRoutinesAsync(string connectionName, CancellationToken ct = default);
+    Task<List<RoutineInfo>> ListRoutinesAsync(string connectionName, string? nameFilter = null, CancellationToken ct = default);
 
     /// <summary>Lists indexes defined on a specific table.</summary>
     Task<List<IndexInfo>> GetTableIndexesAsync(string connectionName, string tableName, string? schema = null, CancellationToken ct = default);

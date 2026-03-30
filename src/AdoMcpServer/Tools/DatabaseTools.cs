@@ -9,13 +9,26 @@ namespace AdoMcpServer.Tools;
 
 /// <summary>MCP tools that expose database metadata and query execution to AI models.</summary>
 [McpServerToolType]
-public class DatabaseTools(IDatabaseService db)
+public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 {
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
+
+    /// <summary>
+    /// Converts a user-provided name pattern into a SQL LIKE filter.
+    /// If the pattern contains no SQL wildcards (% or _), it is treated as a
+    /// substring search by wrapping it in %. If null, returns null (no filter).
+    /// </summary>
+    private static string? ToLikeFilter(string? namePattern)
+    {
+        if (namePattern is null) return null;
+        return namePattern.Contains('%') || namePattern.Contains('_')
+            ? namePattern
+            : $"%{namePattern}%";
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // list_connections
@@ -108,21 +121,28 @@ public class DatabaseTools(IDatabaseService db)
 
     [McpServerTool(Name = "list_tables")]
     [Description("""
-        列出数据库中的所有表（以及可选的视图），包含每个表的注释/描述。
-        这是理解数据库结构的第一步。
+        列出数据库中的表和/或视图，包含每个对象的注释/描述。
+        支持按名称关键字搜索过滤，这是理解数据库结构的第一步。
         """)]
     public async Task<string> ListTablesAsync(
         [Description("数据库连接名称，来自 list_connections 工具的结果。")]
         string connectionName,
         [Description("是否同时列出视图，默认 true。")]
         bool includeViews = true,
+        [Description("""
+            按名称过滤。不含通配符时自动作为子字符串搜索（例如 "user" 匹配所有含 "user" 的表名）。
+            支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回全部。
+            """)]
+        string? namePattern = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            var tables = await db.ListTablesAsync(connectionName, includeViews, cancellationToken);
+            var tables = await db.ListTablesAsync(connectionName, includeViews, ToLikeFilter(namePattern), cancellationToken);
             if (tables.Count == 0)
-                return "数据库中没有找到任何表或视图。";
+                return namePattern is null
+                    ? "数据库中没有找到任何表或视图。"
+                    : $"没有找到名称匹配 '{namePattern}' 的表或视图。";
 
             return JsonSerializer.Serialize(tables, JsonOpts);
         }
@@ -193,17 +213,27 @@ public class DatabaseTools(IDatabaseService db)
     // ─────────────────────────────────────────────────────────────────────────
 
     [McpServerTool(Name = "list_routines")]
-    [Description("列出数据库中的存储过程和函数，包含其定义和注释。SQLite 不支持存储过程，会返回空列表。")]
+    [Description("""
+        列出数据库中的存储过程和函数，包含其类型和注释。SQLite 不支持存储过程，会返回空列表。
+        支持按名称关键字搜索过滤。
+        """)]
     public async Task<string> ListRoutinesAsync(
         [Description("数据库连接名称。")]
         string connectionName,
+        [Description("""
+            按名称过滤。不含通配符时自动作为子字符串搜索（例如 "get" 匹配所有含 "get" 的过程/函数名）。
+            支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回全部。
+            """)]
+        string? namePattern = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            var result = await db.ListRoutinesAsync(connectionName, cancellationToken);
+            var result = await db.ListRoutinesAsync(connectionName, ToLikeFilter(namePattern), cancellationToken);
             if (result.Count == 0)
-                return "没有找到存储过程或函数。";
+                return namePattern is null
+                    ? "没有找到存储过程或函数。"
+                    : $"没有找到名称匹配 '{namePattern}' 的存储过程或函数。";
 
             return JsonSerializer.Serialize(result, JsonOpts);
         }
@@ -222,6 +252,7 @@ public class DatabaseTools(IDatabaseService db)
         在指定数据库上执行任意 SQL 语句并返回结果。
         - SELECT：返回列名和数据行（最多 maxRows 行）。
         - INSERT / UPDATE / DELETE：返回受影响行数。
+        注意：此工具需要服务器以 --allow-any-sql 参数启动才能使用。
         注意：请谨慎执行 DDL 或 DELETE/UPDATE 语句，此操作不可回滚。
         """)]
     public async Task<string> ExecuteSqlAsync(
@@ -233,6 +264,12 @@ public class DatabaseTools(IDatabaseService db)
         int maxRows = 200,
         CancellationToken cancellationToken = default)
     {
+        if (!serverOptions.AllowAnySql)
+            return """
+                错误: execute_sql 工具已禁用。请使用 --allow-any-sql 参数重新启动服务器以启用此功能。
+                例如: dotnet run --project src/AdoMcpServer -- --allow-any-sql
+                """;
+
         maxRows = Math.Clamp(maxRows, 1, 1000);
         try
         {

@@ -9,11 +9,11 @@ AdoMcpServer 是一个基于 [Model Context Protocol (MCP)](https://modelcontext
 | `list_connections` | 列出所有已注册的数据库连接（预配置 + 运行时动态添加） |
 | `add_connection` | **运行时动态添加**数据库连接，无需修改配置文件 |
 | `remove_connection` | 移除一个已注册的连接 |
-| `list_tables` | 列出数据库所有表和视图（含表注释） |
+| `list_tables` | 列出数据库表和/或视图（含注释），支持按名称关键字**搜索过滤** |
 | `get_table_schema` | 获取表的完整结构（列名、类型、主键、**列注释**） |
 | `get_table_indexes` | 获取表上的索引信息 |
-| `list_routines` | 列出存储过程和函数（含定义与注释） |
-| `execute_sql` | 执行任意 SQL 并返回结果集或影响行数 |
+| `list_routines` | 列出存储过程和函数（含类型与注释），支持按名称关键字**搜索过滤** |
+| `execute_sql` | 执行任意 SQL 并返回结果（需 `--allow-any-sql` 启动参数启用） |
 
 ## 支持的数据库
 
@@ -77,6 +77,17 @@ dotnet run --project src/AdoMcpServer -- --http
 
 # 通过环境变量指定
 ADOMCP_MODE=http dotnet run --project src/AdoMcpServer
+```
+
+#### 启用 execute_sql 工具
+
+默认情况下 `execute_sql` 工具**已禁用**，以防止 LLM 在未授权时执行任意 SQL。  
+添加 `--allow-any-sql` 参数即可启用：
+
+```bash
+dotnet run --project src/AdoMcpServer -- --allow-any-sql
+# 可与传输模式组合使用
+dotnet run --project src/AdoMcpServer -- --http --allow-any-sql
 ```
 
 ### 3. 通过 npx 运行（.NET 10）

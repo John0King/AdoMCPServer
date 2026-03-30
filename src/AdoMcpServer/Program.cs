@@ -24,6 +24,16 @@ var modeArg = args.FirstOrDefault(a =>
     a.Equals("--stdio", StringComparison.OrdinalIgnoreCase) ||
     a.Equals("--http",  StringComparison.OrdinalIgnoreCase));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature flags
+//
+//   --allow-any-sql   Enables the execute_sql MCP tool.
+//                     Omit this flag to run in a read-only/safe mode where the
+//                     LLM cannot execute arbitrary SQL against your databases.
+// ─────────────────────────────────────────────────────────────────────────────
+bool allowAnySql = args.Any(a =>
+    a.Equals("--allow-any-sql", StringComparison.OrdinalIgnoreCase));
+
 var envMode = Environment.GetEnvironmentVariable("ADOMCP_MODE");
 
 bool isStdio =
@@ -76,6 +86,7 @@ builder.Services.Configure<List<DatabaseConfig>>(
 
 // ── App services ──────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<IDatabaseService, DatabaseService>();
+builder.Services.AddSingleton(new ServerOptions { AllowAnySql = allowAnySql });
 
 // ── MCP server ────────────────────────────────────────────────────────────────
 var mcpBuilder = builder.Services
