@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
-using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using AdoMcpServer.Models;
 using AdoMcpServer.Services;
 using CsvHelper;
@@ -23,6 +23,18 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     private static readonly CsvConfiguration CsvConfig =
         new(CultureInfo.InvariantCulture) { NewLine = "\n" };
+
+    // Matches destructive DML/DDL keywords at word boundaries (case-insensitive).
+    private static readonly Regex DestructiveKeywordsRegex = new(
+        @"\b(DROP|DELETE|UPDATE|ALTER)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Returns <c>true</c> when the SQL text contains at least one destructive keyword
+    /// (DROP, DELETE, UPDATE, ALTER).
+    /// </summary>
+    private static bool IsDestructiveSql(string sql) =>
+        DestructiveKeywordsRegex.IsMatch(sql);
 
     /// <summary>
     /// Converts a user-provided name pattern into a SQL LIKE filter.
@@ -60,26 +72,25 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         [property: Name("routineName")] string RoutineName,
         [property: Name("comment")]     string? Comment);
 
+    private sealed record ConnectionCsvRow(
+        [property: Name("name")]        string Name,
+        [property: Name("dbType")]      string DbType,
+        [property: Name("description")] string? Description);
+
     // ─────────────────────────────────────────────────────────────────────────
     // list_connections
     // ─────────────────────────────────────────────────────────────────────────
 
     [McpServerTool(Name = "list_connections")]
-    [Description("列出所有已配置的数据库连接名称及类型（包含运行时动态添加的连接）。用于确认可用的连接名称（connectionName）。")]
+    [Description("列出所有已配置的数据库连接名称及类型（包含运行时动态添加的连接）。用于确认可用的连接名称（connectionName）。返回 CSV 格式（name,dbType,description）。")]
     public string ListConnections()
     {
         var configs = db.GetConfigurations();
         if (configs.Count == 0)
             return "没有配置任何数据库连接。请使用 add_connection 工具添加连接，或在 appsettings.json 中添加 Databases 配置节。";
 
-        var sb = new StringBuilder();
-        foreach (var c in configs)
-        {
-            sb.AppendLine($"- **{c.Name}** ({c.DbType})");
-            if (!string.IsNullOrWhiteSpace(c.Description))
-                sb.AppendLine($"  描述: {c.Description}");
-        }
-        return sb.ToString().TrimEnd();
+        return ToCsv(configs.Select(c =>
+            new ConnectionCsvRow(c.Name, c.DbType.ToString(), c.Description)));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -155,14 +166,18 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     [McpServerTool(Name = "list_objects")]
     [Description("""
-        列出数据库中的表和/或视图，包含每个对象的 schema（Oracle 中为 user/owner）、对象类型和注释。
+        列出数据库中的所有对象，包括表、视图、存储过程、函数、触发器、序列、同义词等，
+        包含每个对象的 schema（Oracle 中为 user/owner）、对象类型和注释。
         支持按 schema、名称关键字以及对象类型进行过滤，是理解数据库结构的第一步。
         返回 CSV 格式（schema,objectType,objectName,comment），便于快速浏览大量对象。
         """)]
     public async Task<string> ListObjectsAsync(
         [Description("数据库连接名称，来自 list_connections 工具的结果。")]
         string connectionName,
-        [Description("按对象类型过滤：TABLE、VIEW，留空返回全部（表和视图）。")]
+        [Description("""
+            按对象类型过滤，支持精确匹配，例如：TABLE、VIEW、PROCEDURE、FUNCTION、TRIGGER、SEQUENCE、SYNONYM 等。
+            留空返回全部对象类型。
+            """)]
         string? objectType = null,
         [Description("""
             按 schema 过滤（SQL Server/PostgreSQL 为 schema 名，MySQL 为数据库名，Oracle 为 owner/user）。
@@ -170,7 +185,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
             """)]
         string? schemaFilter = null,
         [Description("""
-            按对象名称过滤。不含通配符时自动作为子字符串搜索（例如 "user" 匹配所有含 "user" 的表名）。
+            按对象名称过滤。不含通配符时自动作为子字符串搜索（例如 "user" 匹配所有含 "user" 的对象名）。
             支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回全部。
             """)]
         string? namePattern = null,
@@ -178,30 +193,23 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     {
         try
         {
-            // includeViews controls whether the query fetches VIEW rows at all.
-            // When objectType is "TABLE" we can skip views entirely; in all other cases
-            // (null = all, "VIEW", etc.) we request both and post-filter if needed.
-            bool includeViews = objectType is null
-                || !objectType.Equals("TABLE", StringComparison.OrdinalIgnoreCase);
-
-            var tables = await db.ListTablesAsync(
+            var objects = await db.ListDbObjectsAsync(
                 connectionName,
-                includeViews,
                 ToLikeFilter(namePattern),
                 ToLikeFilter(schemaFilter),
                 cancellationToken);
 
-            // Post-filter by exact objectType if provided
+            // Post-filter by exact objectType if provided (case-insensitive).
             if (objectType is not null)
-                tables = tables.Where(t =>
-                    t.Type.Equals(objectType, StringComparison.OrdinalIgnoreCase)).ToList();
+                objects = objects.Where(o =>
+                    o.Type.Equals(objectType, StringComparison.OrdinalIgnoreCase)).ToList();
 
-            if (tables.Count == 0)
-                return namePattern is null && schemaFilter is null
-                    ? "数据库中没有找到任何表或视图。"
-                    : $"没有找到匹配条件的表或视图（namePattern='{namePattern}', schema='{schemaFilter}'）。";
+            if (objects.Count == 0)
+                return namePattern is null && schemaFilter is null && objectType is null
+                    ? "数据库中没有找到任何对象。"
+                    : $"没有找到匹配条件的对象（namePattern='{namePattern}', schema='{schemaFilter}', objectType='{objectType}'）。";
 
-            return ToCsv(tables.Select(t => new ObjectCsvRow(t.Schema, t.Type, t.Name, t.Comment)));
+            return ToCsv(objects.Select(o => new ObjectCsvRow(o.Schema, o.Type, o.Name, o.Comment)));
         }
         catch (Exception ex)
         {
@@ -312,10 +320,11 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     [McpServerTool(Name = "execute_sql")]
     [Description("""
-        在指定数据库上执行任意 SQL 语句并返回结果。
+        在指定数据库上执行 SQL 语句并返回结果。
+        - SELECT 及其他只读/非破坏性语句（不含 DROP / DELETE / UPDATE / ALTER）：无需特殊启动参数，默认允许执行。
+        - 包含 DROP / DELETE / UPDATE / ALTER 的语句：需要服务器以 --allow-any-sql 参数启动。
         - SELECT：返回列名和数据行（最多 maxRows 行）。
-        - INSERT / UPDATE / DELETE：返回受影响行数。
-        注意：此工具需要服务器以 --allow-any-sql 参数启动才能使用。
+        - INSERT / DML：返回受影响行数。
         注意：请谨慎执行 DDL 或 DELETE/UPDATE 语句，此操作不可回滚。
         """)]
     public async Task<string> ExecuteSqlAsync(
@@ -327,9 +336,10 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         int maxRows = 200,
         CancellationToken cancellationToken = default)
     {
-        if (!serverOptions.AllowAnySql)
+        // Destructive SQL (DROP / DELETE / UPDATE / ALTER) requires --allow-any-sql.
+        if (IsDestructiveSql(sql) && !serverOptions.AllowAnySql)
             return """
-                错误: execute_sql 工具已禁用。请使用 --allow-any-sql 参数重新启动服务器以启用此功能。
+                错误: 该 SQL 语句包含破坏性操作（DROP / DELETE / UPDATE / ALTER），需要以 --allow-any-sql 参数启动服务器后才能执行。
                 例如: dotnet run --project src/AdoMcpServer -- --allow-any-sql
                 """;
 

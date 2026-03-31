@@ -1,12 +1,16 @@
 namespace AdoMcpServer.Models;
 
-/// <summary>Metadata about a table or view, including its comment/description.</summary>
+/// <summary>
+/// Metadata about any database object (table, view, procedure, function, trigger,
+/// sequence, synonym, etc.), including its comment/description where available.
+/// </summary>
 public class TableInfo
 {
     public string Schema { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
-    public string Type { get; set; } = string.Empty;   // TABLE | VIEW
-    /// <summary>Comment / description attached to the table in the database.</summary>
+    /// <summary>Object type, e.g. TABLE, VIEW, PROCEDURE, FUNCTION, TRIGGER, SEQUENCE, SYNONYM.</summary>
+    public string Type { get; set; } = string.Empty;
+    /// <summary>Comment / description attached to the object in the database (may be null for non-table types).</summary>
     public string? Comment { get; set; }
 }
 
