@@ -1,44 +1,47 @@
 # AdoMcpServer
 
+**AdoMcpServer** is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that helps large language models (LLMs) understand database structure, read table comments, and execute SQL queries.
+
 AdoMcpServer 是一个基于 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 的数据库工具服务，帮助大型语言模型（LLM）理解数据库结构、读取表注释、执行 SQL 查询。
 
-## 功能
+## MCP Tools
 
-| MCP 工具 | 说明 |
+| Tool | Description |
 |---|---|
-| `list_connections` | 列出所有已注册的数据库连接（预配置 + 运行时动态添加） |
-| `add_connection` | **运行时动态添加**数据库连接，无需修改配置文件 |
-| `remove_connection` | 移除一个已注册的连接 |
-| `list_tables` | 列出数据库表和/或视图（含注释），支持按名称关键字**搜索过滤** |
-| `get_table_schema` | 获取表的完整结构（列名、类型、主键、**列注释**） |
-| `get_table_indexes` | 获取表上的索引信息 |
-| `list_routines` | 列出存储过程和函数（含类型与注释），支持按名称关键字**搜索过滤** |
-| `execute_sql` | 执行任意 SQL 并返回结果（需 `--allow-any-sql` 启动参数启用） |
+| `list_connections` | List all configured database connections (pre-configured + dynamically added at runtime) |
+| `add_connection` | **Dynamically add** a database connection at runtime without modifying config files |
+| `remove_connection` | Remove a dynamically-added connection |
+| `list_objects` | List all database objects (tables, views, procedures, functions, triggers, sequences, synonyms, …) with name-filter support |
+| `get_table_schema` | Get the full schema of a table (column names, types, primary keys, **column comments**) |
+| `get_table_indexes` | Get indexes defined on a table |
+| `list_routines` | List stored procedures and functions (with type and comment), with name-filter support |
+| `query_sql` | Execute a **read-only** SQL query and return results as CSV |
+| `execute_sql` | Execute a **write** SQL statement (INSERT / UPDATE / DELETE / DDL) — requires `--allow-any-sql` |
 
-## 支持的数据库
+## Supported Databases
 
-| 数据库 | 驱动 | 注释支持 |
+| Database | Driver | Comment support |
 |---|---|---|
-| **SQL Server** | `Microsoft.Data.SqlClient` | `MS_Description` 扩展属性 |
+| **SQL Server** | `Microsoft.Data.SqlClient` | `MS_Description` extended properties |
 | **MySQL / MariaDB** | `MySqlConnector` | `TABLE_COMMENT` / `COLUMN_COMMENT` |
 | **PostgreSQL** | `Npgsql` | `obj_description` / `col_description` |
-| **SQLite** | `Microsoft.Data.Sqlite` | — (SQLite 无原生注释) |
-| **Oracle** | `Oracle.ManagedDataAccess.Core` | `ALL_TAB_COMMENTS` / `ALL_COL_COMMENTS` |
+| **SQLite** | `Microsoft.Data.Sqlite` | — (SQLite has no native comments) |
+| **Oracle** | `Oracle.ManagedDataAccess.Core` | `ALL_TAB_COMMENTS` / `ALL_COL_COMMENTS` (includes PUBLIC synonyms) |
 
-ORM 支持：[Dapper](https://github.com/DapperLib/Dapper) · [SqlSugarCore](https://www.donet5.com/)
+ORM support: [Dapper](https://github.com/DapperLib/Dapper) · [SqlSugarCore](https://www.donet5.com/)
 
-## 环境要求
+## Requirements
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 
 ---
 
-## 快速开始
+## Quick Start
 
-### 1. 配置数据库连接（可选）
+### 1. Configure database connections (optional)
 
-编辑 `src/AdoMcpServer/appsettings.json`，在 `Databases` 数组中添加预配置连接。  
-也可以完全跳过此步骤，让 LLM 在运行时通过 `add_connection` 工具动态添加连接。
+Edit `src/AdoMcpServer/appsettings.json` and add pre-configured connections under the `Databases` array.  
+You can also skip this step entirely and let the LLM add connections dynamically via the `add_connection` tool.
 
 ```json
 "Databases": [
@@ -46,83 +49,89 @@ ORM 支持：[Dapper](https://github.com/DapperLib/Dapper) · [SqlSugarCore](htt
     "Name": "mydb",
     "DbType": "SqlServer",
     "ConnectionString": "Server=localhost;Database=MyDb;User Id=sa;Password=***;TrustServerCertificate=true;",
-    "Description": "主业务库"
+    "Description": "Main business database"
   }
 ]
 ```
 
-支持的 `DbType` 值：`SqlServer` | `MySql` | `PostgreSql` | `Sqlite` | `Oracle`
+Supported `DbType` values: `SqlServer` | `MySql` | `PostgreSql` | `Sqlite` | `Oracle`
 
-> **安全提示**：生产环境请使用 [.NET User Secrets](https://learn.microsoft.com/aspnet/core/security/app-secrets) 或环境变量管理连接字符串。
+> **Security tip**: Use [.NET User Secrets](https://learn.microsoft.com/aspnet/core/security/app-secrets) or environment variables to manage connection strings in production.
 
-### 2. 运行服务
+### 2. Run the server
 
-#### 自动模式检测（推荐）
+#### Automatic mode detection (recommended)
 
-当进程的标准输入被重定向（即由 MCP 客户端拉起）时，自动使用 **stdio** 模式；  
-在终端交互式运行时，自动使用 **HTTP/SSE** 模式。
+When stdin is redirected (i.e. launched by an MCP client), **stdio** mode is used automatically.  
+When run interactively in a terminal, **HTTP/SSE** mode is used automatically.
 
 ```bash
 dotnet run --project src/AdoMcpServer
 ```
 
-#### 手动指定模式
+#### Specify mode manually
 
 ```bash
-# stdio 模式（所有日志输出到 stderr，stdout 仅传输 MCP JSON-RPC）
+# stdio mode (all logs go to stderr; stdout carries only MCP JSON-RPC)
 dotnet run --project src/AdoMcpServer -- --stdio
 
-# HTTP/SSE 模式（默认监听 http://localhost:5100，MCP 端点 /mcp）
+# HTTP/SSE mode (default: http://localhost:5100, MCP endpoint /mcp)
 dotnet run --project src/AdoMcpServer -- --http
 
-# 通过环境变量指定
+# Via environment variable
 ADOMCP_MODE=http dotnet run --project src/AdoMcpServer
 ```
 
-#### 启用 execute_sql 工具
+#### Enable execute_sql (write operations)
 
-默认情况下 `execute_sql` 工具**已禁用**，以防止 LLM 在未授权时执行任意 SQL。  
-添加 `--allow-any-sql` 参数即可启用：
+By default the `execute_sql` tool is **disabled** to prevent unauthorised writes.  
+Add `--allow-any-sql` to enable it:
 
 ```bash
 dotnet run --project src/AdoMcpServer -- --allow-any-sql
-# 可与传输模式组合使用
+# Combine with transport mode
 dotnet run --project src/AdoMcpServer -- --http --allow-any-sql
 ```
 
-### 3. 通过 npx 运行（.NET 10）
+### 3. Run via NuGet / ndx (.NET 10)
 
-发布 NuGet 包后，可直接通过 npx 调用：
+After the package is published to NuGet.org, you can run it without cloning the repo:
 
 ```bash
-npx adomcpserver
+# Install as a global .NET tool once, then run directly
+dotnet tool install -g AdoMcpServer
+adomcp
+
+# Or use ndx (https://www.npmjs.com/package/ndx) — installs and runs on demand
+npx -y ndx AdoMcpServer
+npx -y ndx AdoMcpServer -- --allow-any-sql
 ```
 
 ---
 
-## 运行时动态连接（无需配置文件）
+## Dynamic connections at runtime (no config file needed)
 
-LLM 可以通过 `add_connection` 工具在会话中随时添加新的数据库连接：
+LLMs can add new database connections during a session using `add_connection`:
 
 ```
-用户: 帮我连接到 Oracle 数据库 oradb01
-LLM → 调用 add_connection(
+User: Connect me to Oracle database oradb01
+LLM → calls add_connection(
     connectionString = "Data Source=oradb01:1521/PROD;User Id=appuser;Password=***;",
     dbType = "Oracle",
     name = "prod-oracle",
-    description = "生产 Oracle 库"
+    description = "Production Oracle DB"
 )
-→ 返回: 连接 'prod-oracle' (Oracle) 已成功添加。
-LLM → 调用 list_tables(connectionName = "prod-oracle")
+→ returns: Connection 'prod-oracle' (Oracle) added successfully.
+LLM → calls list_objects(connectionName = "prod-oracle")
 ```
 
-动态添加的连接仅在当前进程生命周期内有效，重启后需重新添加（或在 appsettings.json 中持久化）。
+Dynamically-added connections exist only for the lifetime of the process; restart the server or add the connection to `appsettings.json` for persistence.
 
 ---
 
-## 在 Claude Desktop / Cursor 中使用
+## Using with Claude Desktop / Cursor
 
-### stdio 模式（推荐）
+### stdio mode (recommended)
 
 ```json
 {
@@ -135,14 +144,27 @@ LLM → 调用 list_tables(connectionName = "prod-oracle")
 }
 ```
 
-### HTTP 模式
+#### Via ndx (after NuGet publish)
 
-先启动服务：
+```json
+{
+  "mcpServers": {
+    "adomcp": {
+      "command": "npx",
+      "args": ["-y", "ndx", "AdoMcpServer"]
+    }
+  }
+}
+```
+
+### HTTP mode
+
+Start the server first:
 ```bash
 dotnet run --project src/AdoMcpServer -- --http
 ```
 
-再配置客户端：
+Then configure the client:
 ```json
 {
   "mcpServers": {
@@ -155,21 +177,35 @@ dotnet run --project src/AdoMcpServer -- --http
 
 ---
 
-## 环境变量
+## Environment variables
 
-所有环境变量以 `ADOMCP_` 为前缀（覆盖 appsettings.json）：
+All environment variables are prefixed with `ADOMCP_` (override `appsettings.json`):
 
-| 变量 | 说明 |
+| Variable | Description |
 |---|---|
-| `ADOMCP_MODE` | 传输模式：`stdio` 或 `http`（未设置时自动检测） |
-| `ADOMCP_URLS` | HTTP 监听地址，如 `http://0.0.0.0:5100` |
+| `ADOMCP_MODE` | Transport mode: `stdio` or `http` (auto-detected when not set) |
+| `ADOMCP_URLS` | HTTP listen address, e.g. `http://0.0.0.0:5100` |
 
-## 构建 & 打包
+---
+
+## MCP Registry (Smithery)
+
+This server is listed on the [Smithery MCP registry](https://smithery.ai/).
+The `smithery.yaml` file at the repository root describes how to launch the server.
+
+To publish to Smithery:
+1. Publish the NuGet package to [NuGet.org](https://www.nuget.org/): `dotnet pack -c Release && dotnet nuget push ...`
+2. Submit the repository URL at [smithery.ai/new](https://smithery.ai/new) — Smithery will read `smithery.yaml` automatically.
+
+## Build & Pack
 
 ```bash
-# 构建
+# Build
 dotnet build
 
-# 打包为 NuGet 工具（支持 npx 调用）
+# Pack as a NuGet tool (supports npx / ndx)
 dotnet pack src/AdoMcpServer -c Release -o ./nupkg
+
+# Publish to NuGet.org (set NUGET_API_KEY first)
+dotnet nuget push ./nupkg/AdoMcpServer.*.nupkg --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY
 ```

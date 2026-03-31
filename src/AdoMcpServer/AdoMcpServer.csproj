@@ -7,15 +7,27 @@
     <Nullable>enable</Nullable>
     <RootNamespace>AdoMcpServer</RootNamespace>
     <AssemblyName>AdoMcpServer</AssemblyName>
-    <Description>AdoMCP Server - MCP server for database schema discovery and SQL execution</Description>
+    <Description>AdoMCP Server — MCP server for database schema discovery and SQL execution (SQL Server, MySQL, PostgreSQL, SQLite, Oracle).</Description>
     <UserSecretsId>AdoMcpServer-secrets</UserSecretsId>
-    <!-- Required for `npx <NuGet-package>` support in .NET 10 -->
+    <!-- Required for `npx <NuGet-package>` / `ndx <NuGet-package>` support in .NET 10 -->
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>adomcp</ToolCommandName>
     <PackageId>AdoMcpServer</PackageId>
     <Version>1.0.0</Version>
-    <Authors>AdoMcpServer</Authors>
+    <Authors>John0King</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/John0King/AdoMCPServer</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/John0King/AdoMCPServer</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>mcp;model-context-protocol;database;sql;sqlserver;mysql;postgresql;sqlite;oracle;ai;llm</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" Condition="Exists('..\..\icon.png')" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="CsvHelper" Version="33.1.0" />

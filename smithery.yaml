@@ -1,0 +1,43 @@
+# Smithery MCP registry configuration
+# https://smithery.ai/docs/config
+#
+# This file enables AdoMcpServer to be discovered and launched from the
+# Smithery MCP registry.  Users can install and run the server via:
+#
+#   npx -y ndx AdoMcpServer                      (requires .NET 10 runtime)
+#   dotnet tool install -g AdoMcpServer           (install globally once)
+#   adomcp                                        (run after global install)
+#
+# MCP client config example (stdio mode):
+#   {
+#     "mcpServers": {
+#       "adomcp": {
+#         "command": "npx",
+#         "args": ["-y", "ndx", "AdoMcpServer"]
+#       }
+#     }
+#   }
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      allowAnySql:
+        type: boolean
+        description: >
+          Allow execution of destructive SQL statements (DROP / DELETE / UPDATE / ALTER).
+          When false (default), only read-only queries via query_sql are permitted.
+        default: false
+    additionalProperties: false
+  commandFunction: |-
+    (config) => ({
+      command: "npx",
+      args: [
+        "-y",
+        "ndx",
+        "AdoMcpServer",
+        "--",
+        ...(config.allowAnySql ? ["--allow-any-sql"] : [])
+      ]
+    })

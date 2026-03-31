@@ -33,10 +33,12 @@ internal sealed class OracleDbProvider(ILogger logger) : DbProviderBase(logger),
     public async Task<List<TableInfo>> ListDbObjectsAsync(
         DbConnection conn, string? nameFilter, string? schemaFilter, CancellationToken ct)
     {
-        // When no schema filter is given, use USER_* views (no special privileges required).
-        // When a schema (owner) is specified, fall back to ALL_* views.
+        // Oracle positional binding: each named parameter must appear exactly once per statement.
         // NVL(:nameFilter, '%') means "match everything when nameFilter is NULL".
-        // Each named parameter appears exactly once, satisfying Oracle positional binding.
+        // When schemaFilter is null: return every object visible through ALL_OBJECTS
+        //   (no owner restriction at all) so the caller sees the full picture.
+        // When schemaFilter is specified: filter ALL_OBJECTS by owner using a LIKE pattern.
+        // In both cases o.OWNER is returned as-is for the Schema column.
         string sql;
         object paramObj;
 
@@ -44,19 +46,20 @@ internal sealed class OracleDbProvider(ILogger logger) : DbProviderBase(logger),
         {
             sql = """
                 SELECT
-                    USER                AS "Schema",
+                    o.OWNER             AS "Schema",
                     o.OBJECT_NAME       AS "Name",
                     o.OBJECT_TYPE       AS "Type",
                     c.COMMENTS          AS "Comment"
-                FROM USER_OBJECTS o
-                LEFT JOIN USER_TAB_COMMENTS c
-                    ON c.TABLE_NAME = o.OBJECT_NAME
+                FROM ALL_OBJECTS o
+                LEFT JOIN ALL_TAB_COMMENTS c
+                    ON c.OWNER = o.OWNER
+                    AND c.TABLE_NAME = o.OBJECT_NAME
                     AND c.TABLE_TYPE = o.OBJECT_TYPE
                 WHERE o.OBJECT_TYPE IN (
                           'TABLE','VIEW','PROCEDURE','FUNCTION',
                           'PACKAGE','TRIGGER','SEQUENCE','SYNONYM')
                   AND UPPER(o.OBJECT_NAME) LIKE UPPER(NVL(:nameFilter, '%'))
-                ORDER BY o.OBJECT_TYPE, o.OBJECT_NAME
+                ORDER BY o.OWNER, o.OBJECT_TYPE, o.OBJECT_NAME
                 """;
             paramObj = new { nameFilter };
         }

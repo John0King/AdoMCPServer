@@ -29,6 +29,11 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         @"\b(DROP|DELETE|UPDATE|ALTER)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // Matches any write (non-SELECT) SQL keywords — used to guard query_sql.
+    private static readonly Regex WriteKeywordsRegex = new(
+        @"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|MERGE|REPLACE)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     /// <summary>
     /// Returns <c>true</c> when the SQL text contains at least one destructive keyword
     /// (DROP, DELETE, UPDATE, ALTER).
@@ -58,6 +63,33 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         return writer.ToString().TrimEnd();
     }
 
+    /// <summary>
+    /// Converts a <see cref="QueryResult"/> (dynamic columns) to a CSV string.
+    /// Returns an empty string when the result has no columns.
+    /// </summary>
+    private static string QueryResultToCsv(QueryResult result)
+    {
+        if (result.Columns.Count == 0) return string.Empty;
+
+        using var writer = new StringWriter();
+        using var csv = new CsvWriter(writer, CsvConfig);
+
+        // Header row
+        foreach (var col in result.Columns)
+            csv.WriteField(col);
+        csv.NextRecord();
+
+        // Data rows
+        foreach (var row in result.Rows)
+        {
+            foreach (var col in result.Columns)
+                csv.WriteField(row.TryGetValue(col, out var val) ? val?.ToString() : null);
+            csv.NextRecord();
+        }
+
+        return writer.ToString().TrimEnd();
+    }
+
     // CSV row types ────────────────────────────────────────────────────────────
 
     private sealed record ObjectCsvRow(
@@ -82,12 +114,12 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     // ─────────────────────────────────────────────────────────────────────────
 
     [McpServerTool(Name = "list_connections")]
-    [Description("列出所有已配置的数据库连接名称及类型（包含运行时动态添加的连接）。用于确认可用的连接名称（connectionName）。返回 CSV 格式（name,dbType,description）。")]
+    [Description("List all configured database connections (pre-configured + dynamically added at runtime). Use this to discover available connection names for other tools. Returns CSV (name,dbType,description).")]
     public string ListConnections()
     {
         var configs = db.GetConfigurations();
         if (configs.Count == 0)
-            return "没有配置任何数据库连接。请使用 add_connection 工具添加连接，或在 appsettings.json 中添加 Databases 配置节。";
+            return "No database connections are configured. Use the add_connection tool to add one, or add a Databases section to appsettings.json.";
 
         return ToCsv(configs.Select(c =>
             new ConnectionCsvRow(c.Name, c.DbType.ToString(), c.Description)));
@@ -99,28 +131,27 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     [McpServerTool(Name = "add_connection")]
     [Description("""
-        在运行时动态添加（或替换）一个数据库连接，无需修改配置文件。
-        添加的连接对所有客户端全局可见。
-        添加后可立即通过其他工具（list_objects、execute_sql 等）使用该连接名称。
-        支持的 dbType 值：SqlServer | MySql | PostgreSql | Sqlite | Oracle
+        Dynamically add (or replace) a database connection at runtime without modifying config files.
+        The connection is immediately available to all other tools via its name.
+        Supported dbType values: SqlServer | MySql | PostgreSql | Sqlite | Oracle
         """)]
     public async Task<string> AddConnectionAsync(
-        [Description("连接字符串，例如 SQL Server: \"Server=host;Database=db;User Id=sa;Password=***;TrustServerCertificate=true;\"")]
+        [Description("Connection string, e.g. for SQL Server: \"Server=host;Database=db;User Id=sa;Password=***;TrustServerCertificate=true;\"")]
         string connectionString,
-        [Description("数据库引擎类型：SqlServer | MySql | PostgreSql | Sqlite | Oracle")]
+        [Description("Database engine type: SqlServer | MySql | PostgreSql | Sqlite | Oracle")]
         string dbType,
-        [Description("连接的逻辑名称，用于其他工具的 connectionName 参数。默认自动生成。")]
+        [Description("Logical name for this connection, used as connectionName in other tools. Auto-generated if omitted.")]
         string? name = null,
-        [Description("连接的描述（可选）。")]
+        [Description("Optional human-readable description of the connection.")]
         string? description = null,
-        [Description("是否在保存前测试连接可用性，默认 true。")]
+        [Description("Test the connection before saving it. Defaults to true.")]
         bool testConnection = true,
         CancellationToken cancellationToken = default)
     {
         if (!Enum.TryParse<Models.DbType>(dbType, ignoreCase: true, out var parsedDbType))
         {
             var validValues = string.Join(", ", Enum.GetNames<Models.DbType>());
-            return $"错误: 无法识别的数据库类型 '{dbType}'。支持的值: {validValues}";
+            return $"Error: unrecognized database type '{dbType}'. Supported values: {validValues}";
         }
 
         var connectionName = string.IsNullOrWhiteSpace(name)
@@ -137,9 +168,9 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
         var error = await db.AddConnectionAsync(config, testFirst: testConnection, ct: cancellationToken);
         if (error is not null)
-            return $"错误: {error}";
+            return $"Error: {error}";
 
-        return $"连接 '{connectionName}' ({parsedDbType}) 已成功添加。现在可以使用此名称调用其他数据库工具。";
+        return $"Connection '{connectionName}' ({parsedDbType}) added successfully. You can now use this name with other database tools.";
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -148,16 +179,16 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     [McpServerTool(Name = "remove_connection")]
     [Description("""
-        移除动态添加的数据库连接。
-        注意：通过配置文件预配置的连接（appsettings.json）属于服务器管理员，不可删除。
+        Remove a dynamically-added database connection.
+        Note: connections pre-configured in appsettings.json cannot be removed this way.
         """)]
     public string RemoveConnection(
-        [Description("要移除的连接名称。")]
+        [Description("Name of the connection to remove.")]
         string connectionName)
     {
         return db.RemoveConnection(connectionName)
-            ? $"连接 '{connectionName}' 已成功移除。"
-            : $"未找到名为 '{connectionName}' 的动态连接（预配置的连接无法删除）。";
+            ? $"Connection '{connectionName}' removed successfully."
+            : $"No dynamic connection named '{connectionName}' was found (pre-configured connections cannot be removed).";
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -166,28 +197,20 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     [McpServerTool(Name = "list_objects")]
     [Description("""
-        列出数据库中的所有对象，包括表、视图、存储过程、函数、触发器、序列、同义词等，
-        包含每个对象的 schema（Oracle 中为 user/owner）、对象类型和注释。
-        支持按 schema、名称关键字以及对象类型进行过滤，是理解数据库结构的第一步。
-        返回 CSV 格式（schema,objectType,objectName,comment），便于快速浏览大量对象。
+        List all objects in the database: tables, views, stored procedures, functions,
+        triggers, sequences, synonyms, etc.  Includes the schema (owner in Oracle),
+        object type, and comment for each object.
+        Supports filtering by schema, name keyword, and object type.
+        Returns CSV (schema,objectType,objectName,comment).
         """)]
     public async Task<string> ListObjectsAsync(
-        [Description("数据库连接名称，来自 list_connections 工具的结果。")]
+        [Description("Database connection name from list_connections.")]
         string connectionName,
-        [Description("""
-            按对象类型过滤，支持精确匹配，例如：TABLE、VIEW、PROCEDURE、FUNCTION、TRIGGER、SEQUENCE、SYNONYM 等。
-            留空返回全部对象类型。
-            """)]
+        [Description("Filter by object type (exact match, case-insensitive): TABLE, VIEW, PROCEDURE, FUNCTION, TRIGGER, SEQUENCE, SYNONYM, etc. Leave empty to return all types.")]
         string? objectType = null,
-        [Description("""
-            按 schema 过滤（SQL Server/PostgreSQL 为 schema 名，MySQL 为数据库名，Oracle 为 owner/user）。
-            支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回当前 schema/user 下的全部对象。
-            """)]
+        [Description("Filter by schema name (SQL Server/PostgreSQL: schema name; MySQL: database name; Oracle: owner/user). Supports SQL LIKE wildcards: % = any string, _ = single character. Leave empty to return objects from the current schema/user.")]
         string? schemaFilter = null,
-        [Description("""
-            按对象名称过滤。不含通配符时自动作为子字符串搜索（例如 "user" 匹配所有含 "user" 的对象名）。
-            支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回全部。
-            """)]
+        [Description("Filter by object name. Without wildcards, treated as a substring search (e.g. \"user\" matches all objects containing \"user\"). Supports SQL LIKE wildcards. Leave empty to return all.")]
         string? namePattern = null,
         CancellationToken cancellationToken = default)
     {
@@ -206,14 +229,14 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
             if (objects.Count == 0)
                 return namePattern is null && schemaFilter is null && objectType is null
-                    ? "数据库中没有找到任何对象。"
-                    : $"没有找到匹配条件的对象（namePattern='{namePattern}', schema='{schemaFilter}', objectType='{objectType}'）。";
+                    ? "No objects found in the database."
+                    : $"No objects matched the filters (namePattern='{namePattern}', schema='{schemaFilter}', objectType='{objectType}').";
 
             return ToCsv(objects.Select(o => new ObjectCsvRow(o.Schema, o.Type, o.Name, o.Comment)));
         }
         catch (Exception ex)
         {
-            return $"错误: {ex.Message}";
+            return $"Error: {ex.Message}";
         }
     }
 
@@ -223,16 +246,16 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     [McpServerTool(Name = "get_table_schema")]
     [Description("""
-        获取指定表的详细结构，包含：
-        - 每列的名称、数据类型、是否可空、是否主键、默认值、最大长度
-        - 表注释和每列的注释/描述（对理解业务含义非常重要）
+        Get the detailed structure of a table, including:
+        - Column name, data type, nullability, primary-key flag, default value, max length
+        - Table comment and per-column comments (important for understanding business semantics)
         """)]
     public async Task<string> GetTableSchemaAsync(
-        [Description("数据库连接名称。")]
+        [Description("Database connection name.")]
         string connectionName,
-        [Description("表名（不含 schema 前缀）。")]
+        [Description("Table name (without schema prefix).")]
         string tableName,
-        [Description("Schema 名称，SQL Server 默认 dbo，PostgreSQL 默认 public，Oracle 默认当前用户，MySQL/SQLite 可留空。")]
+        [Description("Schema name. Defaults: SQL Server = dbo, PostgreSQL = public, Oracle = current user, MySQL/SQLite = leave empty.")]
         string? schema = null,
         CancellationToken cancellationToken = default)
     {
@@ -243,7 +266,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         }
         catch (Exception ex)
         {
-            return $"错误: {ex.Message}";
+            return $"Error: {ex.Message}";
         }
     }
 
@@ -252,13 +275,13 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     // ─────────────────────────────────────────────────────────────────────────
 
     [McpServerTool(Name = "get_table_indexes")]
-    [Description("获取指定表上定义的所有索引，包含索引名称、是否唯一、是否主键及涉及的列。")]
+    [Description("Get all indexes defined on a table, including index name, uniqueness, primary-key flag, and the columns involved.")]
     public async Task<string> GetTableIndexesAsync(
-        [Description("数据库连接名称。")]
+        [Description("Database connection name.")]
         string connectionName,
-        [Description("表名。")]
+        [Description("Table name.")]
         string tableName,
-        [Description("Schema 名称，可留空使用默认值。")]
+        [Description("Schema name. Leave empty to use the default schema.")]
         string? schema = null,
         CancellationToken cancellationToken = default)
     {
@@ -269,7 +292,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         }
         catch (Exception ex)
         {
-            return $"错误: {ex.Message}";
+            return $"Error: {ex.Message}";
         }
     }
 
@@ -279,22 +302,17 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     [McpServerTool(Name = "list_routines")]
     [Description("""
-        列出数据库中的存储过程和函数，包含其 schema、类型和注释。SQLite 不支持存储过程，会返回空列表。
-        支持按 schema 和名称关键字搜索过滤。
-        返回 CSV 格式（schema,routineType,routineName,comment），便于快速浏览。
+        List stored procedures and functions in the database, including schema, type, and comment.
+        SQLite does not support stored procedures and will return an empty list.
+        Supports filtering by schema and name keyword.
+        Returns CSV (schema,routineType,routineName,comment).
         """)]
     public async Task<string> ListRoutinesAsync(
-        [Description("数据库连接名称。")]
+        [Description("Database connection name.")]
         string connectionName,
-        [Description("""
-            按名称过滤。不含通配符时自动作为子字符串搜索（例如 "get" 匹配所有含 "get" 的过程/函数名）。
-            支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回全部。
-            """)]
+        [Description("Filter by name. Without wildcards, treated as a substring search. Supports SQL LIKE wildcards. Leave empty to return all.")]
         string? namePattern = null,
-        [Description("""
-            按 schema 过滤（SQL Server/PostgreSQL 为 schema 名，MySQL 为数据库名，Oracle 为 owner/user）。
-            支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回当前 schema/user 下的全部对象。
-            """)]
+        [Description("Filter by schema name (SQL Server/PostgreSQL: schema; MySQL: database; Oracle: owner/user). Supports SQL LIKE wildcards. Leave empty to return all in the current schema/user.")]
         string? schemaFilter = null,
         CancellationToken cancellationToken = default)
     {
@@ -303,14 +321,64 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
             var result = await db.ListRoutinesAsync(connectionName, ToLikeFilter(namePattern), ToLikeFilter(schemaFilter), cancellationToken);
             if (result.Count == 0)
                 return namePattern is null && schemaFilter is null
-                    ? "没有找到存储过程或函数。"
-                    : $"没有找到匹配条件的存储过程或函数（namePattern='{namePattern}', schema='{schemaFilter}'）。";
+                    ? "No stored procedures or functions found."
+                    : $"No routines matched the filters (namePattern='{namePattern}', schema='{schemaFilter}').";
 
             return ToCsv(result.Select(r => new RoutineCsvRow(r.Schema, r.Type, r.Name, r.Comment)));
         }
         catch (Exception ex)
         {
-            return $"错误: {ex.Message}";
+            return $"Error: {ex.Message}";
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // query_sql
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [McpServerTool(Name = "query_sql")]
+    [Description("""
+        Execute a read-only SQL query and return the results as CSV.
+        Suitable for SELECT statements and any SQL that produces a result set.
+        Destructive operations (DROP / DELETE / UPDATE / ALTER) are not allowed;
+        use execute_sql (with --allow-any-sql) for those.
+        Returns CSV with column headers on the first row followed by data rows.
+        Returns a message when the query produces no rows.
+        """)]
+    public async Task<string> QuerySqlAsync(
+        [Description("Database connection name.")]
+        string connectionName,
+        [Description("SQL query to execute (SELECT or any read-only statement).")]
+        string sql,
+        [Description("Maximum number of rows to return. Default 200, max 1000.")]
+        int maxRows = 200,
+        CancellationToken cancellationToken = default)
+    {
+        if (WriteKeywordsRegex.IsMatch(sql))
+            return """
+                Error: the SQL contains a write operation (INSERT / UPDATE / DELETE / DROP / ALTER / CREATE / TRUNCATE).
+                Use the execute_sql tool for write operations (requires --allow-any-sql).
+                """;
+
+        maxRows = Math.Clamp(maxRows, 1, 1000);
+        try
+        {
+            var result = await db.ExecuteSqlAsync(connectionName, sql, maxRows, cancellationToken);
+
+            if (result.ErrorMessage is not null)
+                return $"Error: {result.ErrorMessage}";
+
+            if (result.Columns.Count == 0)
+                return "Query executed successfully but returned no result set (non-SELECT statement?). Use execute_sql for DML/DDL.";
+
+            if (result.Rows.Count == 0)
+                return "Query returned 0 rows.";
+
+            return QueryResultToCsv(result);
+        }
+        catch (Exception ex)
+        {
+            return $"Error: {ex.Message}";
         }
     }
 
@@ -320,38 +388,39 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     [McpServerTool(Name = "execute_sql")]
     [Description("""
-        在指定数据库上执行 SQL 语句并返回结果。
-        - SELECT 及其他只读/非破坏性语句（不含 DROP / DELETE / UPDATE / ALTER）：无需特殊启动参数，默认允许执行。
-        - 包含 DROP / DELETE / UPDATE / ALTER 的语句：需要服务器以 --allow-any-sql 参数启动。
-        - SELECT：返回列名和数据行（最多 maxRows 行）。
-        - INSERT / DML：返回受影响行数。
-        注意：请谨慎执行 DDL 或 DELETE/UPDATE 语句，此操作不可回滚。
+        Execute a SQL statement that modifies data or schema (INSERT / UPDATE / DELETE / DDL).
+        Requires the server to be started with the --allow-any-sql argument.
+        Returns the number of rows affected.
+        WARNING: Use with caution — DDL and bulk DELETE/UPDATE may not be reversible.
+        For read-only SELECT queries use query_sql instead.
         """)]
     public async Task<string> ExecuteSqlAsync(
-        [Description("数据库连接名称。")]
+        [Description("Database connection name.")]
         string connectionName,
-        [Description("要执行的 SQL 语句。")]
+        [Description("SQL statement to execute (INSERT / UPDATE / DELETE / DDL).")]
         string sql,
-        [Description("SELECT 结果最大返回行数，默认 200，最大 1000。")]
-        int maxRows = 200,
         CancellationToken cancellationToken = default)
     {
-        // Destructive SQL (DROP / DELETE / UPDATE / ALTER) requires --allow-any-sql.
-        if (IsDestructiveSql(sql) && !serverOptions.AllowAnySql)
+        if (!serverOptions.AllowAnySql)
             return """
-                错误: 该 SQL 语句包含破坏性操作（DROP / DELETE / UPDATE / ALTER），需要以 --allow-any-sql 参数启动服务器后才能执行。
-                例如: dotnet run --project src/AdoMcpServer -- --allow-any-sql
+                Error: execute_sql is disabled. Start the server with --allow-any-sql to enable write operations.
+                Example: dotnet run --project src/AdoMcpServer -- --allow-any-sql
                 """;
 
-        maxRows = Math.Clamp(maxRows, 1, 1000);
         try
         {
-            var result = await db.ExecuteSqlAsync(connectionName, sql, maxRows, cancellationToken);
-            return JsonSerializer.Serialize(result, JsonOpts);
+            var result = await db.ExecuteSqlAsync(connectionName, sql, maxRows: 0, cancellationToken);
+
+            if (result.ErrorMessage is not null)
+                return $"Error: {result.ErrorMessage}";
+
+            return result.RowsAffected >= 0
+                ? $"{result.RowsAffected} row(s) affected."
+                : "Statement executed successfully.";
         }
         catch (Exception ex)
         {
-            return $"错误: {ex.Message}";
+            return $"Error: {ex.Message}";
         }
     }
 }
