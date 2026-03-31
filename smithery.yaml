@@ -4,7 +4,7 @@
 # This file enables AdoMcpServer to be discovered and launched from the
 # Smithery MCP registry.  Users can install and run the server via:
 #
-#   npx -y ndx AdoMcpServer                      (requires .NET 10 runtime)
+#   dnx AdoMcpServer                              (requires .NET 10 runtime)
 #   dotnet tool install -g AdoMcpServer           (install globally once)
 #   adomcp                                        (run after global install)
 #
@@ -12,8 +12,8 @@
 #   {
 #     "mcpServers": {
 #       "adomcp": {
-#         "command": "npx",
-#         "args": ["-y", "ndx", "AdoMcpServer"]
+#         "command": "dnx",
+#         "args": ["AdoMcpServer"]
 #       }
 #     }
 #   }
@@ -32,10 +32,8 @@ startCommand:
     additionalProperties: false
   commandFunction: |-
     (config) => ({
-      command: "npx",
+      command: "dnx",
       args: [
-        "-y",
-        "ndx",
         "AdoMcpServer",
         "--",
         ...(config.allowAnySql ? ["--allow-any-sql"] : [])

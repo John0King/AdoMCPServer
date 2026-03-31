@@ -93,7 +93,7 @@ dotnet run --project src/AdoMcpServer -- --allow-any-sql
 dotnet run --project src/AdoMcpServer -- --http --allow-any-sql
 ```
 
-### 3. Run via NuGet / ndx (.NET 10)
+### 3. Run via NuGet / dnx (.NET 10)
 
 After the package is published to NuGet.org, you can run it without cloning the repo:
 
@@ -102,9 +102,9 @@ After the package is published to NuGet.org, you can run it without cloning the 
 dotnet tool install -g AdoMcpServer
 adomcp
 
-# Or use ndx (https://www.npmjs.com/package/ndx) — installs and runs on demand
-npx -y ndx AdoMcpServer
-npx -y ndx AdoMcpServer -- --allow-any-sql
+# Or use dnx (.NET 10+) — installs and runs on demand
+dnx AdoMcpServer
+dnx AdoMcpServer -- --allow-any-sql
 ```
 
 ---
@@ -144,14 +144,14 @@ Dynamically-added connections exist only for the lifetime of the process; restar
 }
 ```
 
-#### Via ndx (after NuGet publish)
+#### Via dnx (after NuGet publish)
 
 ```json
 {
   "mcpServers": {
     "adomcp": {
-      "command": "npx",
-      "args": ["-y", "ndx", "AdoMcpServer"]
+      "command": "dnx",
+      "args": ["AdoMcpServer"]
     }
   }
 }
@@ -203,7 +203,7 @@ To publish to Smithery:
 # Build
 dotnet build
 
-# Pack as a NuGet tool (supports npx / ndx)
+# Pack as a NuGet tool (supports dnx)
 dotnet pack src/AdoMcpServer -c Release -o ./nupkg
 
 # Publish to NuGet.org (set NUGET_API_KEY first)
