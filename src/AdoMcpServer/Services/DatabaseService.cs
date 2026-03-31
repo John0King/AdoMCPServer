@@ -94,7 +94,7 @@ public class DatabaseService(
     }
 
     public async Task<List<TableInfo>> ListTablesAsync(
-        string connectionName, bool includeViews = true, string? nameFilter = null, CancellationToken ct = default)
+        string connectionName, bool includeViews = true, string? nameFilter = null, string? schemaFilter = null, CancellationToken ct = default)
     {
         var cfg = GetConfig(connectionName);
         await using var conn = CreateConnection(cfg);
@@ -102,11 +102,11 @@ public class DatabaseService(
 
         return cfg.DbType switch
         {
-            DbType.SqlServer   => await ListTablesSqlServerAsync(conn, includeViews, nameFilter, ct),
-            DbType.MySql       => await ListTablesMySqlAsync(conn, includeViews, nameFilter, ct),
-            DbType.PostgreSql  => await ListTablesPostgreSqlAsync(conn, includeViews, nameFilter, ct),
+            DbType.SqlServer   => await ListTablesSqlServerAsync(conn, includeViews, nameFilter, schemaFilter, ct),
+            DbType.MySql       => await ListTablesMySqlAsync(conn, includeViews, nameFilter, schemaFilter, ct),
+            DbType.PostgreSql  => await ListTablesPostgreSqlAsync(conn, includeViews, nameFilter, schemaFilter, ct),
             DbType.Sqlite      => await ListTablesSqliteAsync(conn, includeViews, nameFilter, ct),
-            DbType.Oracle      => await ListTablesOracleAsync(conn, includeViews, nameFilter, ct),
+            DbType.Oracle      => await ListTablesOracleAsync(conn, includeViews, nameFilter, schemaFilter, ct),
             _                  => throw new NotSupportedException($"DbType '{cfg.DbType}' is not supported.")
         };
     }
@@ -130,7 +130,7 @@ public class DatabaseService(
     }
 
     public async Task<List<RoutineInfo>> ListRoutinesAsync(
-        string connectionName, string? nameFilter = null, CancellationToken ct = default)
+        string connectionName, string? nameFilter = null, string? schemaFilter = null, CancellationToken ct = default)
     {
         var cfg = GetConfig(connectionName);
         await using var conn = CreateConnection(cfg);
@@ -138,11 +138,11 @@ public class DatabaseService(
 
         return cfg.DbType switch
         {
-            DbType.SqlServer   => await ListRoutinesSqlServerAsync(conn, nameFilter, ct),
-            DbType.MySql       => await ListRoutinesMySqlAsync(conn, nameFilter, ct),
-            DbType.PostgreSql  => await ListRoutinesPostgreSqlAsync(conn, nameFilter, ct),
+            DbType.SqlServer   => await ListRoutinesSqlServerAsync(conn, nameFilter, schemaFilter, ct),
+            DbType.MySql       => await ListRoutinesMySqlAsync(conn, nameFilter, schemaFilter, ct),
+            DbType.PostgreSql  => await ListRoutinesPostgreSqlAsync(conn, nameFilter, schemaFilter, ct),
             DbType.Sqlite      => [],   // SQLite has no stored procedures
-            DbType.Oracle      => await ListRoutinesOracleAsync(conn, nameFilter, ct),
+            DbType.Oracle      => await ListRoutinesOracleAsync(conn, nameFilter, schemaFilter, ct),
             _                  => throw new NotSupportedException($"DbType '{cfg.DbType}' is not supported.")
         };
     }
@@ -242,7 +242,7 @@ public class DatabaseService(
     // ─────────────────────────────────────────────────────────────────────────
 
     private static async Task<List<TableInfo>> ListTablesSqlServerAsync(
-        DbConnection conn, bool includeViews, string? nameFilter, CancellationToken ct)
+        DbConnection conn, bool includeViews, string? nameFilter, string? schemaFilter, CancellationToken ct)
     {
         var typeFilter = includeViews ? "('U','V')" : "('U')";
         var sql = $"""
@@ -260,10 +260,11 @@ public class DatabaseService(
                 AND ep.class = 1
             WHERE t.type IN {typeFilter}
               AND (@nameFilter IS NULL OR t.name LIKE @nameFilter)
+              AND (@schemaFilter IS NULL OR s.name LIKE @schemaFilter)
             ORDER BY s.name, t.name
             """;
 
-        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter }, cancellationToken: ct));
+        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter, schemaFilter }, cancellationToken: ct));
         return rows.Select(r => new TableInfo
         {
             Schema  = (string)r.Schema,
@@ -340,7 +341,7 @@ public class DatabaseService(
     // ─────────────────────────────────────────────────────────────────────────
 
     private static async Task<List<TableInfo>> ListTablesMySqlAsync(
-        DbConnection conn, bool includeViews, string? nameFilter, CancellationToken ct)
+        DbConnection conn, bool includeViews, string? nameFilter, string? schemaFilter, CancellationToken ct)
     {
         var typeFilter = includeViews
             ? "TABLE_TYPE IN ('BASE TABLE','VIEW')"
@@ -353,13 +354,13 @@ public class DatabaseService(
                 CASE TABLE_TYPE WHEN 'BASE TABLE' THEN 'TABLE' ELSE 'VIEW' END AS `Type`,
                 TABLE_COMMENT   AS `Comment`
             FROM information_schema.TABLES
-            WHERE TABLE_SCHEMA = DATABASE()
+            WHERE ((@schemaFilter IS NULL AND TABLE_SCHEMA = DATABASE()) OR TABLE_SCHEMA LIKE @schemaFilter)
               AND {typeFilter}
               AND (@nameFilter IS NULL OR TABLE_NAME LIKE @nameFilter)
-            ORDER BY TABLE_NAME
+            ORDER BY TABLE_SCHEMA, TABLE_NAME
             """;
 
-        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter }, cancellationToken: ct));
+        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter, schemaFilter }, cancellationToken: ct));
         return rows.Select(r => new TableInfo
         {
             Schema  = (string)r.Schema,
@@ -420,7 +421,7 @@ public class DatabaseService(
     // ─────────────────────────────────────────────────────────────────────────
 
     private static async Task<List<TableInfo>> ListTablesPostgreSqlAsync(
-        DbConnection conn, bool includeViews, string? nameFilter, CancellationToken ct)
+        DbConnection conn, bool includeViews, string? nameFilter, string? schemaFilter, CancellationToken ct)
     {
         var typeFilter = includeViews
             ? "c.relkind IN ('r','v','m')"
@@ -441,10 +442,11 @@ public class DatabaseService(
             WHERE {typeFilter}
               AND n.nspname NOT IN ('pg_catalog','information_schema')
               AND (@nameFilter IS NULL OR c.relname ILIKE @nameFilter)
+              AND (@schemaFilter IS NULL OR n.nspname ILIKE @schemaFilter)
             ORDER BY n.nspname, c.relname
             """;
 
-        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter }, cancellationToken: ct));
+        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter, schemaFilter }, cancellationToken: ct));
         return rows.Select(r => new TableInfo
         {
             Schema  = (string)r.Schema,
@@ -577,7 +579,7 @@ public class DatabaseService(
     // ─────────────────────────────────────────────────────────────────────────
 
     private static async Task<List<RoutineInfo>> ListRoutinesSqlServerAsync(
-        DbConnection conn, string? nameFilter, CancellationToken ct)
+        DbConnection conn, string? nameFilter, string? schemaFilter, CancellationToken ct)
     {
         const string sql = """
             SELECT
@@ -598,10 +600,11 @@ public class DatabaseService(
                 AND ep.name = 'MS_Description' AND ep.class = 1
             WHERE o.type IN ('P','FN','TF','IF')
               AND (@nameFilter IS NULL OR o.name LIKE @nameFilter)
+              AND (@schemaFilter IS NULL OR s.name LIKE @schemaFilter)
             ORDER BY s.name, o.name
             """;
 
-        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter }, cancellationToken: ct));
+        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter, schemaFilter }, cancellationToken: ct));
         return rows.Select(r => new RoutineInfo
         {
             Schema     = (string)r.Schema,
@@ -617,7 +620,7 @@ public class DatabaseService(
     // ─────────────────────────────────────────────────────────────────────────
 
     private static async Task<List<RoutineInfo>> ListRoutinesMySqlAsync(
-        DbConnection conn, string? nameFilter, CancellationToken ct)
+        DbConnection conn, string? nameFilter, string? schemaFilter, CancellationToken ct)
     {
         const string sql = """
             SELECT
@@ -627,12 +630,12 @@ public class DatabaseService(
                 ROUTINE_DEFINITION  AS `Definition`,
                 NULL                AS `Comment`
             FROM information_schema.ROUTINES
-            WHERE ROUTINE_SCHEMA = DATABASE()
+            WHERE ((@schemaFilter IS NULL AND ROUTINE_SCHEMA = DATABASE()) OR ROUTINE_SCHEMA LIKE @schemaFilter)
               AND (@nameFilter IS NULL OR ROUTINE_NAME LIKE @nameFilter)
-            ORDER BY ROUTINE_NAME
+            ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME
             """;
 
-        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter }, cancellationToken: ct));
+        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter, schemaFilter }, cancellationToken: ct));
         return rows.Select(r => new RoutineInfo
         {
             Schema     = (string)r.Schema,
@@ -648,7 +651,7 @@ public class DatabaseService(
     // ─────────────────────────────────────────────────────────────────────────
 
     private static async Task<List<RoutineInfo>> ListRoutinesPostgreSqlAsync(
-        DbConnection conn, string? nameFilter, CancellationToken ct)
+        DbConnection conn, string? nameFilter, string? schemaFilter, CancellationToken ct)
     {
         const string sql = """
             SELECT
@@ -666,10 +669,11 @@ public class DatabaseService(
             JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE n.nspname NOT IN ('pg_catalog','information_schema')
               AND (@nameFilter IS NULL OR p.proname ILIKE @nameFilter)
+              AND (@schemaFilter IS NULL OR n.nspname ILIKE @schemaFilter)
             ORDER BY n.nspname, p.proname
             """;
 
-        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter }, cancellationToken: ct));
+        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter, schemaFilter }, cancellationToken: ct));
         return rows.Select(r => new RoutineInfo
         {
             Schema     = (string)r.Schema,
@@ -830,26 +834,51 @@ public class DatabaseService(
     // ─────────────────────────────────────────────────────────────────────────
 
     private static async Task<List<TableInfo>> ListTablesOracleAsync(
-        DbConnection conn, bool includeViews, string? nameFilter, CancellationToken ct)
+        DbConnection conn, bool includeViews, string? nameFilter, string? schemaFilter, CancellationToken ct)
     {
-        var typeFilter = includeViews ? "o.OBJECT_TYPE IN ('TABLE','VIEW')" : "o.OBJECT_TYPE = 'TABLE'";
-        // Oracle data-dictionary stores names in UPPERCASE; use UPPER for case-insensitive matching.
-        var sql = $"""
-            SELECT
-                o.OWNER         AS "Schema",
-                o.OBJECT_NAME   AS "Name",
-                o.OBJECT_TYPE   AS "Type",
-                c.COMMENTS      AS "Comment"
-            FROM ALL_OBJECTS o
-            LEFT JOIN ALL_TAB_COMMENTS c
-                ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
-            WHERE {typeFilter}
-              AND o.OWNER = SYS_CONTEXT('USERENV','CURRENT_SCHEMA')
-              AND (:nameFilter IS NULL OR UPPER(o.OBJECT_NAME) LIKE UPPER(:nameFilter))
-            ORDER BY o.OBJECT_NAME
-            """;
+        // When no schema filter is given, use USER_* views which require no special privileges.
+        // When a specific schema (owner) is requested, fall back to ALL_* views.
+        string sql;
+        object param;
 
-        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter }, cancellationToken: ct));
+        if (schemaFilter is null)
+        {
+            var typeFilter = includeViews ? "o.OBJECT_TYPE IN ('TABLE','VIEW')" : "o.OBJECT_TYPE = 'TABLE'";
+            sql = $"""
+                SELECT
+                    USER                AS "Schema",
+                    o.OBJECT_NAME       AS "Name",
+                    o.OBJECT_TYPE       AS "Type",
+                    c.COMMENTS          AS "Comment"
+                FROM USER_OBJECTS o
+                LEFT JOIN USER_TAB_COMMENTS c ON c.TABLE_NAME = o.OBJECT_NAME
+                WHERE {typeFilter}
+                  AND (:nameFilter IS NULL OR UPPER(o.OBJECT_NAME) LIKE UPPER(:nameFilter))
+                ORDER BY o.OBJECT_NAME
+                """;
+            param = new { nameFilter };
+        }
+        else
+        {
+            var typeFilter = includeViews ? "o.OBJECT_TYPE IN ('TABLE','VIEW')" : "o.OBJECT_TYPE = 'TABLE'";
+            sql = $"""
+                SELECT
+                    o.OWNER             AS "Schema",
+                    o.OBJECT_NAME       AS "Name",
+                    o.OBJECT_TYPE       AS "Type",
+                    c.COMMENTS          AS "Comment"
+                FROM ALL_OBJECTS o
+                LEFT JOIN ALL_TAB_COMMENTS c
+                    ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
+                WHERE {typeFilter}
+                  AND UPPER(o.OWNER) LIKE UPPER(:schemaFilter)
+                  AND (:nameFilter IS NULL OR UPPER(o.OBJECT_NAME) LIKE UPPER(:nameFilter))
+                ORDER BY o.OWNER, o.OBJECT_NAME
+                """;
+            param = new { nameFilter, schemaFilter };
+        }
+
+        var rows = await conn.QueryAsync(new CommandDefinition(sql, param, cancellationToken: ct));
         return rows.Select(r => new TableInfo
         {
             Schema  = (string)r.Schema,
@@ -937,22 +966,44 @@ public class DatabaseService(
     // ─────────────────────────────────────────────────────────────────────────
 
     private static async Task<List<RoutineInfo>> ListRoutinesOracleAsync(
-        DbConnection conn, string? nameFilter, CancellationToken ct)
+        DbConnection conn, string? nameFilter, string? schemaFilter, CancellationToken ct)
     {
-        const string sql = """
-            SELECT
-                p.OWNER         AS "Schema",
-                p.OBJECT_NAME   AS "Name",
-                p.OBJECT_TYPE   AS "Type",
-                NULL            AS "Comment"
-            FROM ALL_PROCEDURES p
-            WHERE p.OWNER = SYS_CONTEXT('USERENV','CURRENT_SCHEMA')
-              AND p.OBJECT_TYPE IN ('PROCEDURE','FUNCTION','PACKAGE')
-              AND (:nameFilter IS NULL OR UPPER(p.OBJECT_NAME) LIKE UPPER(:nameFilter))
-            ORDER BY p.OBJECT_NAME
-            """;
+        string sql;
+        object param;
 
-        var rows = await conn.QueryAsync(new CommandDefinition(sql, new { nameFilter }, cancellationToken: ct));
+        if (schemaFilter is null)
+        {
+            sql = """
+                SELECT
+                    USER            AS "Schema",
+                    p.OBJECT_NAME   AS "Name",
+                    p.OBJECT_TYPE   AS "Type",
+                    NULL            AS "Comment"
+                FROM USER_PROCEDURES p
+                WHERE p.OBJECT_TYPE IN ('PROCEDURE','FUNCTION','PACKAGE')
+                  AND (:nameFilter IS NULL OR UPPER(p.OBJECT_NAME) LIKE UPPER(:nameFilter))
+                ORDER BY p.OBJECT_NAME
+                """;
+            param = new { nameFilter };
+        }
+        else
+        {
+            sql = """
+                SELECT
+                    p.OWNER         AS "Schema",
+                    p.OBJECT_NAME   AS "Name",
+                    p.OBJECT_TYPE   AS "Type",
+                    NULL            AS "Comment"
+                FROM ALL_PROCEDURES p
+                WHERE UPPER(p.OWNER) LIKE UPPER(:schemaFilter)
+                  AND p.OBJECT_TYPE IN ('PROCEDURE','FUNCTION','PACKAGE')
+                  AND (:nameFilter IS NULL OR UPPER(p.OBJECT_NAME) LIKE UPPER(:nameFilter))
+                ORDER BY p.OWNER, p.OBJECT_NAME
+                """;
+            param = new { nameFilter, schemaFilter };
+        }
+
+        var rows = await conn.QueryAsync(new CommandDefinition(sql, param, cancellationToken: ct));
         return rows.Select(r => new RoutineInfo
         {
             Schema     = (string)r.Schema,

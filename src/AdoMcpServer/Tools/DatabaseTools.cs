@@ -1,8 +1,12 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using AdoMcpServer.Models;
 using AdoMcpServer.Services;
+using CsvHelper;
+using CsvHelper.Configuration;
+using CsvHelper.Configuration.Attributes;
 using ModelContextProtocol.Server;
 
 namespace AdoMcpServer.Tools;
@@ -17,6 +21,9 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
+    private static readonly CsvConfiguration CsvConfig =
+        new(CultureInfo.InvariantCulture) { NewLine = "\n" };
+
     /// <summary>
     /// Converts a user-provided name pattern into a SQL LIKE filter.
     /// If the pattern contains no SQL wildcards (% or _), it is treated as a
@@ -29,6 +36,29 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
             ? namePattern
             : $"%{namePattern}%";
     }
+
+    /// <summary>Serialises a sequence of records to a CSV string using CsvHelper.</summary>
+    private static string ToCsv<T>(IEnumerable<T> records)
+    {
+        using var writer = new StringWriter();
+        using var csv = new CsvWriter(writer, CsvConfig);
+        csv.WriteRecords(records);
+        return writer.ToString().TrimEnd();
+    }
+
+    // CSV row types ────────────────────────────────────────────────────────────
+
+    private sealed record ObjectCsvRow(
+        [property: Name("schema")]     string Schema,
+        [property: Name("objectType")] string ObjectType,
+        [property: Name("objectName")] string ObjectName,
+        [property: Name("comment")]    string? Comment);
+
+    private sealed record RoutineCsvRow(
+        [property: Name("schema")]      string Schema,
+        [property: Name("routineType")] string RoutineType,
+        [property: Name("routineName")] string RoutineName,
+        [property: Name("comment")]     string? Comment);
 
     // ─────────────────────────────────────────────────────────────────────────
     // list_connections
@@ -60,7 +90,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     [Description("""
         在运行时动态添加（或替换）一个数据库连接，无需修改配置文件。
         添加的连接对所有客户端全局可见。
-        添加后可立即通过其他工具（list_tables、execute_sql 等）使用该连接名称。
+        添加后可立即通过其他工具（list_objects、execute_sql 等）使用该连接名称。
         支持的 dbType 值：SqlServer | MySql | PostgreSql | Sqlite | Oracle
         """)]
     public async Task<string> AddConnectionAsync(
@@ -120,21 +150,27 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // list_tables
+    // list_objects
     // ─────────────────────────────────────────────────────────────────────────
 
-    [McpServerTool(Name = "list_tables")]
+    [McpServerTool(Name = "list_objects")]
     [Description("""
-        列出数据库中的表和/或视图，包含每个对象的注释/描述。
-        支持按名称关键字搜索过滤，这是理解数据库结构的第一步。
+        列出数据库中的表和/或视图，包含每个对象的 schema（Oracle 中为 user/owner）、对象类型和注释。
+        支持按 schema、名称关键字以及对象类型进行过滤，是理解数据库结构的第一步。
+        返回 CSV 格式（schema,objectType,objectName,comment），便于快速浏览大量对象。
         """)]
-    public async Task<string> ListTablesAsync(
+    public async Task<string> ListObjectsAsync(
         [Description("数据库连接名称，来自 list_connections 工具的结果。")]
         string connectionName,
-        [Description("是否同时列出视图，默认 true。")]
-        bool includeViews = true,
+        [Description("按对象类型过滤：TABLE、VIEW，留空返回全部（表和视图）。")]
+        string? objectType = null,
         [Description("""
-            按名称过滤。不含通配符时自动作为子字符串搜索（例如 "user" 匹配所有含 "user" 的表名）。
+            按 schema 过滤（SQL Server/PostgreSQL 为 schema 名，MySQL 为数据库名，Oracle 为 owner/user）。
+            支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回当前 schema/user 下的全部对象。
+            """)]
+        string? schemaFilter = null,
+        [Description("""
+            按对象名称过滤。不含通配符时自动作为子字符串搜索（例如 "user" 匹配所有含 "user" 的表名）。
             支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回全部。
             """)]
         string? namePattern = null,
@@ -142,13 +178,30 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
     {
         try
         {
-            var tables = await db.ListTablesAsync(connectionName, includeViews, ToLikeFilter(namePattern), cancellationToken);
-            if (tables.Count == 0)
-                return namePattern is null
-                    ? "数据库中没有找到任何表或视图。"
-                    : $"没有找到名称匹配 '{namePattern}' 的表或视图。";
+            // includeViews controls whether the query fetches VIEW rows at all.
+            // When objectType is "TABLE" we can skip views entirely; in all other cases
+            // (null = all, "VIEW", etc.) we request both and post-filter if needed.
+            bool includeViews = objectType is null
+                || !objectType.Equals("TABLE", StringComparison.OrdinalIgnoreCase);
 
-            return JsonSerializer.Serialize(tables, JsonOpts);
+            var tables = await db.ListTablesAsync(
+                connectionName,
+                includeViews,
+                ToLikeFilter(namePattern),
+                ToLikeFilter(schemaFilter),
+                cancellationToken);
+
+            // Post-filter by exact objectType if provided
+            if (objectType is not null)
+                tables = tables.Where(t =>
+                    t.Type.Equals(objectType, StringComparison.OrdinalIgnoreCase)).ToList();
+
+            if (tables.Count == 0)
+                return namePattern is null && schemaFilter is null
+                    ? "数据库中没有找到任何表或视图。"
+                    : $"没有找到匹配条件的表或视图（namePattern='{namePattern}', schema='{schemaFilter}'）。";
+
+            return ToCsv(tables.Select(t => new ObjectCsvRow(t.Schema, t.Type, t.Name, t.Comment)));
         }
         catch (Exception ex)
         {
@@ -218,8 +271,9 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
 
     [McpServerTool(Name = "list_routines")]
     [Description("""
-        列出数据库中的存储过程和函数，包含其类型和注释。SQLite 不支持存储过程，会返回空列表。
-        支持按名称关键字搜索过滤。
+        列出数据库中的存储过程和函数，包含其 schema、类型和注释。SQLite 不支持存储过程，会返回空列表。
+        支持按 schema 和名称关键字搜索过滤。
+        返回 CSV 格式（schema,routineType,routineName,comment），便于快速浏览。
         """)]
     public async Task<string> ListRoutinesAsync(
         [Description("数据库连接名称。")]
@@ -229,17 +283,22 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
             支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回全部。
             """)]
         string? namePattern = null,
+        [Description("""
+            按 schema 过滤（SQL Server/PostgreSQL 为 schema 名，MySQL 为数据库名，Oracle 为 owner/user）。
+            支持 SQL LIKE 通配符：% 代表任意字符串，_ 代表单个字符。留空返回当前 schema/user 下的全部对象。
+            """)]
+        string? schemaFilter = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            var result = await db.ListRoutinesAsync(connectionName, ToLikeFilter(namePattern), cancellationToken);
+            var result = await db.ListRoutinesAsync(connectionName, ToLikeFilter(namePattern), ToLikeFilter(schemaFilter), cancellationToken);
             if (result.Count == 0)
-                return namePattern is null
+                return namePattern is null && schemaFilter is null
                     ? "没有找到存储过程或函数。"
-                    : $"没有找到名称匹配 '{namePattern}' 的存储过程或函数。";
+                    : $"没有找到匹配条件的存储过程或函数（namePattern='{namePattern}', schema='{schemaFilter}'）。";
 
-            return JsonSerializer.Serialize(result, JsonOpts);
+            return ToCsv(result.Select(r => new RoutineCsvRow(r.Schema, r.Type, r.Name, r.Comment)));
         }
         catch (Exception ex)
         {
@@ -286,4 +345,3 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         }
     }
 }
-

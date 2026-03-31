@@ -18,6 +18,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="CsvHelper" Version="33.1.0" />
     <PackageReference Include="Dapper" Version="2.1.72" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.5" />
@@ -28,6 +29,7 @@
     <PackageReference Include="Oracle.ManagedDataAccess.Core" Version="23.26.100" />
     <!-- SqlSugarCore is included as an ORM option for consumers of this tool server -->
     <PackageReference Include="SqlSugarCore" Version="5.1.4.214" />
+    <PackageReference Include="System.CommandLine" Version="2.0.5" />
   </ItemGroup>
 
 </Project>
