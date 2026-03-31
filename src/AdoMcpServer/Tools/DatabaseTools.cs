@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Globalization;
-using System.Text;
 using System.Text.Json;
 using AdoMcpServer.Models;
 using AdoMcpServer.Services;
@@ -60,26 +59,25 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         [property: Name("routineName")] string RoutineName,
         [property: Name("comment")]     string? Comment);
 
+    private sealed record ConnectionCsvRow(
+        [property: Name("name")]        string Name,
+        [property: Name("dbType")]      string DbType,
+        [property: Name("description")] string? Description);
+
     // ─────────────────────────────────────────────────────────────────────────
     // list_connections
     // ─────────────────────────────────────────────────────────────────────────
 
     [McpServerTool(Name = "list_connections")]
-    [Description("列出所有已配置的数据库连接名称及类型（包含运行时动态添加的连接）。用于确认可用的连接名称（connectionName）。")]
+    [Description("列出所有已配置的数据库连接名称及类型（包含运行时动态添加的连接）。用于确认可用的连接名称（connectionName）。返回 CSV 格式（name,dbType,description）。")]
     public string ListConnections()
     {
         var configs = db.GetConfigurations();
         if (configs.Count == 0)
             return "没有配置任何数据库连接。请使用 add_connection 工具添加连接，或在 appsettings.json 中添加 Databases 配置节。";
 
-        var sb = new StringBuilder();
-        foreach (var c in configs)
-        {
-            sb.AppendLine($"- **{c.Name}** ({c.DbType})");
-            if (!string.IsNullOrWhiteSpace(c.Description))
-                sb.AppendLine($"  描述: {c.Description}");
-        }
-        return sb.ToString().TrimEnd();
+        return ToCsv(configs.Select(c =>
+            new ConnectionCsvRow(c.Name, c.DbType.ToString(), c.Description)));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
