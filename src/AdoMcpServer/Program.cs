@@ -3,7 +3,6 @@ using AdoMcpServer.Models;
 using AdoMcpServer.Services;
 using AdoMcpServer.Tools;
 using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -37,8 +36,8 @@ var rootCommand = new RootCommand(
     allowAnySqlOption,
 };
 
-// Allow unrecognised tokens to pass through to the ASP.NET Core host so that
-// standard host arguments such as --urls or --environment still work.
+// Allow unrecognised tokens to pass through so that standard host arguments
+// such as --urls or --environment still work.
 rootCommand.TreatUnmatchedTokensAsErrors = false;
 
 rootCommand.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
@@ -51,79 +50,75 @@ rootCommand.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
                StringComparison.OrdinalIgnoreCase);
 
     bool allowAnySql = parseResult.GetValue(allowAnySqlOption);
-    bool isStdio = !isHttp;
 
-    // Forward any unrecognised tokens to ASP.NET Core (e.g. --urls, --environment).
-    var aspNetArgs = parseResult.UnmatchedTokens.ToArray();
+    // Forward any unrecognised tokens (e.g. --urls, --environment).
+    var extraArgs = parseResult.UnmatchedTokens.ToArray();
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Builder
-    // ─────────────────────────────────────────────────────────────────────────
-    var builder = WebApplication.CreateBuilder(aspNetArgs);
-
-    // ── Configuration ─────────────────────────────────────────────────────────
-    builder.Configuration
-        .SetBasePath(AppContext.BaseDirectory)
-        .AddJsonFile("appsettings.json", optional: true)
-        .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true)
-        .AddEnvironmentVariables("ADOMCP_")
-        .AddUserSecrets<Program>(optional: true);
-
-    // ── Logging ───────────────────────────────────────────────────────────────
-    // In stdio mode the stdout stream is the MCP transport channel — ALL log
-    // output MUST go to stderr so it never corrupts the JSON-RPC message stream.
-    builder.Logging.ClearProviders();
-    if (isStdio)
+    if (isHttp)
     {
-        builder.Logging.AddConsole(opts => opts.LogToStandardErrorThreshold = LogLevel.Trace);
-    }
-    else
-    {
+        // ─────────────────────────────────────────────────────────────────────
+        // HTTP / SSE mode – full ASP.NET Core web application
+        // ─────────────────────────────────────────────────────────────────────
+        var builder = WebApplication.CreateBuilder(extraArgs);
+
+        ConfigureConfiguration(builder.Configuration, builder.Environment.EnvironmentName);
+        builder.Logging.ClearProviders();
         builder.Logging.AddConsole();
-    }
+        ConfigureServices(builder.Services, builder.Configuration, allowAnySql);
+        builder.Services
+            .AddMcpServer()
+            .WithToolsFromAssembly(typeof(DatabaseTools).Assembly)
+            .WithHttpTransport();
 
-    // ── Kestrel: suppress HTTP server in stdio mode ───────────────────────────
-    // In stdio mode there is no HTTP traffic; prevent Kestrel from binding any
-    // port so we don't waste resources or conflict with other services.
-    if (isStdio)
-    {
-        builder.WebHost.UseUrls(string.Empty);
-    }
-
-    // ── Database configs ──────────────────────────────────────────────────────
-    builder.Services.Configure<List<DatabaseConfig>>(
-        builder.Configuration.GetSection("Databases"));
-
-    // ── App services ──────────────────────────────────────────────────────────
-    builder.Services.AddSingleton<IDatabaseService, DatabaseService>();
-    builder.Services.AddSingleton(new ServerOptions { AllowAnySql = allowAnySql });
-
-    // ── MCP server ────────────────────────────────────────────────────────────
-    var mcpBuilder = builder.Services
-        .AddMcpServer()
-        .WithToolsFromAssembly(typeof(DatabaseTools).Assembly);
-
-    if (isStdio)
-    {
-        mcpBuilder.WithStdioServerTransport();
+        var app = builder.Build();
+        app.MapMcp("/mcp");
+        await app.RunAsync(ct);
     }
     else
     {
-        mcpBuilder.WithHttpTransport();
+        // ─────────────────────────────────────────────────────────────────────
+        // stdio mode – pure console host (no Kestrel / web server started).
+        // stdout is the MCP JSON-RPC transport channel; ALL logging MUST go
+        // to stderr so it never corrupts the message stream.
+        // ─────────────────────────────────────────────────────────────────────
+        var hostBuilder = Host.CreateApplicationBuilder(extraArgs);
+
+        ConfigureConfiguration(hostBuilder.Configuration, hostBuilder.Environment.EnvironmentName);
+        hostBuilder.Logging.ClearProviders();
+        hostBuilder.Logging.AddConsole(opts => opts.LogToStandardErrorThreshold = LogLevel.Trace);
+        ConfigureServices(hostBuilder.Services, hostBuilder.Configuration, allowAnySql);
+        hostBuilder.Services
+            .AddMcpServer()
+            .WithToolsFromAssembly(typeof(DatabaseTools).Assembly)
+            .WithStdioServerTransport();
+
+        var host = hostBuilder.Build();
+        await host.RunAsync(ct);
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // App
-    // ─────────────────────────────────────────────────────────────────────────
-    var app = builder.Build();
-
-    if (!isStdio)
-    {
-        app.MapMcp("/mcp");
-    }
-
-    await app.RunAsync();
 });
 
 var result = rootCommand.Parse(args);
 return await result.InvokeAsync();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared setup helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void ConfigureConfiguration(IConfigurationBuilder config, string environmentName)
+{
+    config.Sources.Clear();
+    config
+        .SetBasePath(AppContext.BaseDirectory)
+        .AddJsonFile("appsettings.json", optional: true)
+        .AddJsonFile($"appsettings.{environmentName}.json", optional: true)
+        .AddEnvironmentVariables("ADOMCP_")
+        .AddUserSecrets<Program>(optional: true);
+}
+
+static void ConfigureServices(
+    IServiceCollection services, IConfiguration configuration, bool allowAnySql)
+{
+    services.Configure<List<DatabaseConfig>>(configuration.GetSection("Databases"));
+    services.AddSingleton<IDatabaseService, DatabaseService>();
+    services.AddSingleton(new ServerOptions { AllowAnySql = allowAnySql });
+}

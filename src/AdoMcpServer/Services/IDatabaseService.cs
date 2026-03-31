@@ -21,8 +21,11 @@ public interface IDatabaseService
     /// </summary>
     bool RemoveConnection(string name);
 
-    /// <summary>Lists tables (and optionally views) in the target database, including their comments.</summary>
-    Task<List<TableInfo>> ListTablesAsync(string connectionName, bool includeViews = true, string? nameFilter = null, string? schemaFilter = null, CancellationToken ct = default);
+    /// <summary>
+    /// Lists all database objects (tables, views, procedures, functions, triggers, sequences, etc.)
+    /// in the target database.
+    /// </summary>
+    Task<List<TableInfo>> ListDbObjectsAsync(string connectionName, string? nameFilter = null, string? schemaFilter = null, CancellationToken ct = default);
 
     /// <summary>Returns the full schema of a table, including column types and comments.</summary>
     Task<TableSchema> GetTableSchemaAsync(string connectionName, string tableName, string? schema = null, CancellationToken ct = default);
