@@ -1,8 +1,12 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using AdoMcpServer.Models;
 using AdoMcpServer.Services;
+using CsvHelper;
+using CsvHelper.Configuration;
+using CsvHelper.Configuration.Attributes;
 using ModelContextProtocol.Server;
 
 namespace AdoMcpServer.Tools;
@@ -17,6 +21,9 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
+    private static readonly CsvConfiguration CsvConfig =
+        new(CultureInfo.InvariantCulture) { NewLine = "\n" };
+
     /// <summary>
     /// Converts a user-provided name pattern into a SQL LIKE filter.
     /// If the pattern contains no SQL wildcards (% or _), it is treated as a
@@ -30,14 +37,28 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
             : $"%{namePattern}%";
     }
 
-    /// <summary>Formats a value for a CSV cell, quoting and escaping as necessary.</summary>
-    private static string CsvCell(string? value)
+    /// <summary>Serialises a sequence of records to a CSV string using CsvHelper.</summary>
+    private static string ToCsv<T>(IEnumerable<T> records)
     {
-        if (value is null) return string.Empty;
-        if (value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
-            return $"\"{value.Replace("\"", "\"\"")}\"";
-        return value;
+        using var writer = new StringWriter();
+        using var csv = new CsvWriter(writer, CsvConfig);
+        csv.WriteRecords(records);
+        return writer.ToString().TrimEnd();
     }
+
+    // CSV row types ────────────────────────────────────────────────────────────
+
+    private sealed record ObjectCsvRow(
+        [property: Name("schema")]     string Schema,
+        [property: Name("objectType")] string ObjectType,
+        [property: Name("objectName")] string ObjectName,
+        [property: Name("comment")]    string? Comment);
+
+    private sealed record RoutineCsvRow(
+        [property: Name("schema")]      string Schema,
+        [property: Name("routineType")] string RoutineType,
+        [property: Name("routineName")] string RoutineName,
+        [property: Name("comment")]     string? Comment);
 
     // ─────────────────────────────────────────────────────────────────────────
     // list_connections
@@ -180,12 +201,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
                     ? "数据库中没有找到任何表或视图。"
                     : $"没有找到匹配条件的表或视图（namePattern='{namePattern}', schema='{schemaFilter}'）。";
 
-            // Output as CSV for token efficiency
-            var sb = new StringBuilder();
-            sb.AppendLine("schema,objectType,objectName,comment");
-            foreach (var t in tables)
-                sb.AppendLine($"{CsvCell(t.Schema)},{CsvCell(t.Type)},{CsvCell(t.Name)},{CsvCell(t.Comment)}");
-            return sb.ToString().TrimEnd();
+            return ToCsv(tables.Select(t => new ObjectCsvRow(t.Schema, t.Type, t.Name, t.Comment)));
         }
         catch (Exception ex)
         {
@@ -282,11 +298,7 @@ public class DatabaseTools(IDatabaseService db, ServerOptions serverOptions)
                     ? "没有找到存储过程或函数。"
                     : $"没有找到匹配条件的存储过程或函数（namePattern='{namePattern}', schema='{schemaFilter}'）。";
 
-            var sb = new StringBuilder();
-            sb.AppendLine("schema,routineType,routineName,comment");
-            foreach (var r in result)
-                sb.AppendLine($"{CsvCell(r.Schema)},{CsvCell(r.Type)},{CsvCell(r.Name)},{CsvCell(r.Comment)}");
-            return sb.ToString().TrimEnd();
+            return ToCsv(result.Select(r => new RoutineCsvRow(r.Schema, r.Type, r.Name, r.Comment)));
         }
         catch (Exception ex)
         {
