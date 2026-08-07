@@ -1,5 +1,7 @@
 # AdoMcp
 
+[![NuGet](https://img.shields.io/nuget/v/AdoMcp.svg)](https://www.nuget.org/packages/AdoMcp)
+
 **AdoMcp** is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that helps large language models (LLMs) understand database structure, read table comments, and execute SQL queries.
 
 AdoMcp 是一个基于 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 的数据库工具服务，帮助大型语言模型（LLM）理解数据库结构、读取表注释、执行 SQL 查询。
@@ -55,70 +57,115 @@ ORM support: [Dapper](https://github.com/DapperLib/Dapper) · [SqlSugarCore](htt
 
 ### 1. Configure database connections (optional)
 
-Edit `src/AdoMcp/appsettings.json` and add pre-configured connections under the `Databases` array.  
-You can also skip this step entirely and let the LLM add connections dynamically via the `add_connection` tool.
+AdoMcp loads configuration from multiple sources (later sources override earlier ones):
+
+1. `appsettings.json` (in the app directory)
+2. `appsettings.{Environment}.json`
+3. **`~/.adomcp.json`** — user-level config (`%USERPROFILE%\.adomcp.json` on Windows), persists connections and `AllowAnySql` without touching the app directory
+4. Environment variables prefixed `ADOMCP_`
+5. [.NET User Secrets](https://learn.microsoft.com/aspnet/core/security/app-secrets)
+
+You can pre-configure connections in any of these. You can also skip this step entirely and let the LLM add connections dynamically via the `add_connection` tool.
 
 ```json
-"Databases": [
-  {
-    "Name": "mydb",
-    "DbType": "SqlServer",
-    "ConnectionString": "Server=localhost;Database=MyDb;User Id=sa;Password=***;TrustServerCertificate=true;",
-    "Description": "Main business database"
-  }
-]
+{
+  "AllowAnySql": false,
+  "Databases": [
+    {
+      "Name": "mydb",
+      "DbType": "SqlServer",
+      "ConnectionString": "Server=localhost;Database=MyDb;User Id=sa;Password=***;TrustServerCertificate=true;",
+      "Description": "Main business database"
+    }
+  ]
+}
 ```
 
 Supported `DbType` values: `SqlServer` | `MySql` | `PostgreSql` | `Sqlite` | `Oracle`
 
 > **Security tip**: Use [.NET User Secrets](https://learn.microsoft.com/aspnet/core/security/app-secrets) or environment variables to manage connection strings in production.
 
+#### User-level config example (`~/.adomcp.json`)
+
+Create `~/.adomcp.json` in your home directory to persist personal connections and settings across projects:
+
+```json
+{
+  "AllowAnySql": true,
+  "Databases": [
+    {
+      "Name": "local-pg",
+      "DbType": "PostgreSql",
+      "ConnectionString": "Host=localhost;Database=dev;Username=postgres;Password=***;",
+      "Description": "Local PostgreSQL dev DB"
+    }
+  ]
+}
+```
+
 ### 2. Run the server
 
-#### Automatic mode detection (recommended)
+#### Default mode
 
-When stdin is redirected (i.e. launched by an MCP client), **stdio** mode is used automatically.  
-When run interactively in a terminal, **HTTP/SSE** mode is used automatically.
+By default the server runs in **stdio** mode (the standard MCP transport for local clients).
+Use `--http` (or `ADOMCP_MODE=http`) to switch to **HTTP/SSE** mode.
 
 ```bash
-dotnet run --project src/AdoMcp
+# stdio mode (default) - all logs go to stderr; stdout carries only MCP JSON-RPC
+dnx AdoMcp
 ```
 
 #### Specify mode manually
 
 ```bash
 # stdio mode (all logs go to stderr; stdout carries only MCP JSON-RPC)
-dotnet run --project src/AdoMcp -- --stdio
+dnx AdoMcp -- --stdio
 
 # HTTP/SSE mode (default: http://localhost:5100, MCP endpoint /mcp)
-dotnet run --project src/AdoMcp -- --http
+dnx AdoMcp -- --http
 
 # Via environment variable
-ADOMCP_MODE=http dotnet run --project src/AdoMcp
+ADOMCP_MODE=http 
+dnx AdoMcp
 ```
 
 #### Enable execute_sql (write operations)
 
 By default the `execute_sql` tool is **disabled** to prevent unauthorised writes.  
-Add `--allow-any-sql` to enable it:
+Enable it via CLI flag, config file, or environment variable (CLI flag wins when explicitly set):
 
 ```bash
-dotnet run --project src/AdoMcp -- --allow-any-sql
+# CLI flag
 # Combine with transport mode
-dotnet run --project src/AdoMcp -- --http --allow-any-sql
+dnx AdoMcp -- --http --allow-any-sql
 ```
 
-### 3. Run via NuGet / dnx (.NET 10)
-
-After the package is published to NuGet.org, you can run it without cloning the repo:
+```jsonc
+// ~/.adomcp.json or appsettings.json
+{
+  "AllowAnySql": true
+}
+```
 
 ```bash
-# Install as a global .NET tool once, then run directly
+# Environment variable
+# ADOMCP_ALLOWANYSQL=true dnx AdoMcp
+```
+
+Priority: `--allow-any-sql` CLI > `ADOMCP_ALLOWANYSQL` env > `~/.adomcp.json` `AllowAnySql` > `appsettings.json` `AllowAnySql` > `false` (default).
+
+### 3. Alternative: Install as a global .NET tool
+
+After the package is published to NuGet.org, you can also install it as a global tool:
+
+```bash
 dotnet tool install -g AdoMcp
 adomcp
+```
 
-# Or use dnx (.NET 10+) — installs and runs on demand
-dnx AdoMcp
+You can also run dnx directly (installs and runs on demand, .NET 10+):
+
+```bash
 dnx AdoMcp -- --allow-any-sql
 ```
 
@@ -185,6 +232,8 @@ All environment variables are prefixed with `ADOMCP_` (override `appsettings.jso
 |---|---|
 | `ADOMCP_MODE` | Transport mode: `stdio` or `http` (auto-detected when not set) |
 | `ADOMCP_URLS` | HTTP listen address, e.g. `http://0.0.0.0:5100` |
+| `ADOMCP_ALLOWANYSQL` | Enable the `execute_sql` tool: `true` or `false` (default `false`) |
+| `ADOMCP_DATABASES` | JSON-encoded `Databases` array (overrides config-file connections) |
 
 ---
 
