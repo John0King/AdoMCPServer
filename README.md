@@ -45,7 +45,7 @@ Oracle note: objects without owner prefix may be synonyms. Always confirm the re
 | **SQLite** | `Microsoft.Data.Sqlite` | — (SQLite has no native comments) |
 | **Oracle** | `Oracle.ManagedDataAccess.Core` | `ALL_TAB_COMMENTS` / `ALL_COL_COMMENTS` (includes PUBLIC synonyms) |
 
-ORM support: [Dapper](https://github.com/DapperLib/Dapper) · [SqlSugarCore](https://www.donet5.com/)
+ORM support: [Dapper](https://github.com/DapperLib/Dapper)
 
 ## Requirements
 
@@ -112,21 +112,21 @@ Use `--http` (or `ADOMCP_MODE=http`) to switch to **HTTP/SSE** mode.
 
 ```bash
 # stdio mode (default) - all logs go to stderr; stdout carries only MCP JSON-RPC
-dnx AdoMcp
+dnx -y AdoMcp
 ```
 
 #### Specify mode manually
 
 ```bash
 # stdio mode (all logs go to stderr; stdout carries only MCP JSON-RPC)
-dnx AdoMcp -- --stdio
+dnx -y AdoMcp -- --stdio
 
 # HTTP/SSE mode (default: http://localhost:5100, MCP endpoint /mcp)
-dnx AdoMcp -- --http
+dnx -y AdoMcp -- --http
 
 # Via environment variable
 ADOMCP_MODE=http 
-dnx AdoMcp
+dnx -y AdoMcp
 ```
 
 #### Enable execute_sql (write operations)
@@ -137,7 +137,7 @@ Enable it via CLI flag, config file, or environment variable (CLI flag wins when
 ```bash
 # CLI flag
 # Combine with transport mode
-dnx AdoMcp -- --http --allow-any-sql
+dnx -y AdoMcp -- --http --allow-any-sql
 ```
 
 ```jsonc
@@ -149,7 +149,7 @@ dnx AdoMcp -- --http --allow-any-sql
 
 ```bash
 # Environment variable
-# ADOMCP_ALLOWANYSQL=true dnx AdoMcp
+# ADOMCP_ALLOWANYSQL=true dnx -y AdoMcp
 ```
 
 Priority: `--allow-any-sql` CLI > `ADOMCP_ALLOWANYSQL` env > `~/.adomcp.json` `AllowAnySql` > `appsettings.json` `AllowAnySql` > `false` (default).
@@ -166,7 +166,7 @@ adomcp
 You can also run dnx directly (installs and runs on demand, .NET 10+):
 
 ```bash
-dnx AdoMcp -- --allow-any-sql
+dnx -y AdoMcp -- --allow-any-sql
 ```
 
 ---
@@ -191,20 +191,22 @@ Dynamically-added connections exist only for the lifetime of the process; restar
 
 ---
 
-#### Via dnx (after NuGet publish)
+## Client configuration
+
+### Via dnx (stdio)
 
 ```json
 {
   "mcpServers": {
     "adomcp": {
       "command": "dnx",
-      "args": ["-y","AdoMcp"]
+      "args": ["-y", "AdoMcp"]
     }
   }
 }
 ```
 
-### HTTP mode
+### Via HTTP/SSE
 
 Start the server first:
 ```bash
@@ -239,25 +241,4 @@ All environment variables are prefixed with `ADOMCP_` (override `appsettings.jso
 
 ## MCP Registries
 
-### Official MCP Registry
-
-This repository now includes `server.json` for the official MCP Registry with the server name `io.github.John0King/adomcp`.
-
-To publish to the official MCP Registry:
-1. Publish the NuGet package `AdoMcp` to [NuGet.org](https://www.nuget.org/).
-2. Push a version tag such as `v1.0.1`, or manually run the `Publish to NuGet and MCP Registry` GitHub Actions workflow.
-3. The workflow publishes the NuGet package, authenticates with GitHub OIDC, and publishes `server.json` to the MCP Registry.
-
-
-## Build & Pack
-
-```bash
-# Build
-dotnet build
-
-# Pack as a NuGet tool (supports dnx)
-dotnet pack src/AdoMcp -c Release -o ./nupkg
-
-# Publish to NuGet.org (set NUGET_API_KEY first)
-dotnet nuget push ./nupkg/AdoMcp.*.nupkg --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY
-```
+AdoMcp is registered in the official [MCP Registry](https://registry.modelcontextprotocol.io/) under the server name `io.github.John0King/adomcp`.

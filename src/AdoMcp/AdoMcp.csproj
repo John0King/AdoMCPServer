@@ -41,7 +41,6 @@
     <PackageReference Include="MySqlConnector" Version="2.6.1" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="Oracle.ManagedDataAccess.Core" Version="23.26.200" />
-    <!-- SqlSugarCore is included as an ORM option for consumers of this tool server -->
     <PackageReference Include="System.CommandLine" Version="2.0.9" />
   </ItemGroup>
 
