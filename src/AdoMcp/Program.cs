@@ -2,12 +2,8 @@ using System.CommandLine;
 using AdoMcp.Models;
 using AdoMcp.Services;
 using AdoMcp.Tools;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.FileProviders.Physical;
-using Microsoft.Extensions.Logging;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI definition
