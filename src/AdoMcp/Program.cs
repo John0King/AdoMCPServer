@@ -5,6 +5,8 @@ using AdoMcp.Tools;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.FileProviders.Physical;
 using Microsoft.Extensions.Logging;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -111,7 +113,7 @@ static async Task RunStdioModeAsync(string[] args, bool? cliAllowAnySql, Cancell
 
 /// <summary>Rebuilds the configuration pipeline, layering JSON files, environment variables
 /// (prefixed <c>ADOMCP_</c>), and user secrets on top of each other.</summary>
-static void ConfigureConfiguration(IConfigurationBuilder config, string environmentName)
+static void ConfigureConfiguration(ConfigurationManager config, string environmentName)
 {
     config.Sources.Clear();
     config
@@ -122,7 +124,7 @@ static void ConfigureConfiguration(IConfigurationBuilder config, string environm
         // Lets users persist AllowAnySql and connection strings without touching the
         // app directory. Loaded last so it overrides appsettings, but is overridden by
         // environment variables and user secrets (higher precedence).
-        .AddJsonFile(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".adomcp.json"), optional: true)
+        .AddJsonFile(new PhysicalFileProvider(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ExclusionFilters.None), ".adomcp.json", optional: true, reloadOnChange: true)
         .AddEnvironmentVariables("ADOMCP_")
         .AddUserSecrets<Program>(optional: true);
 }

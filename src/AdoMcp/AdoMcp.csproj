@@ -15,7 +15,7 @@
     <IsPackable>true</IsPackable>
     <ToolCommandName>adomcp</ToolCommandName>
     <PackageId>AdoMcp</PackageId>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Authors>John0King</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/John0King/AdoMCP</PackageProjectUrl>
